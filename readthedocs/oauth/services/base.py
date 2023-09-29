@@ -1,21 +1,16 @@
 """OAuth utility functions."""
 
-import structlog
 from datetime import datetime
 
+import structlog
 from allauth.socialaccount.models import SocialAccount
 from allauth.socialaccount.providers import registry
 from django.conf import settings
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 from oauthlib.oauth2.rfc6749.errors import InvalidClientIdError
 from requests.exceptions import RequestException
 from requests_oauthlib import OAuth2Session
-
-from readthedocs.oauth.models import (
-    RemoteOrganizationRelation,
-    RemoteRepositoryRelation,
-)
-
 
 log = structlog.get_logger(__name__)
 
@@ -24,7 +19,10 @@ class SyncServiceError(Exception):
 
     """Error raised when a service failed to sync."""
 
-    pass
+    INVALID_OR_REVOKED_ACCESS_TOKEN = _(
+        "Our access to your following accounts was revoked: {provider}. "
+        "Please, reconnect them from your social account connections."
+    )
 
 
 class Service:
@@ -47,6 +45,11 @@ class Service:
         self.session = None
         self.user = user
         self.account = account
+        log.bind(
+            user_username=self.user.username,
+            social_provider=self.provider_id,
+            social_account_id=self.account.pk,
+        )
 
     @classmethod
     def for_user(cls, user):
@@ -89,22 +92,24 @@ class Service:
             return None
 
         token_config = {
-            'access_token': token.token,
-            'token_type': 'bearer',
+            "access_token": token.token,
+            "token_type": "bearer",
         }
         if token.expires_at is not None:
             token_expires = (token.expires_at - timezone.now()).total_seconds()
-            token_config.update({
-                'refresh_token': token.token_secret,
-                'expires_in': token_expires,
-            })
+            token_config.update(
+                {
+                    "refresh_token": token.token_secret,
+                    "expires_in": token_expires,
+                }
+            )
 
         self.session = OAuth2Session(
             client_id=token.app.client_id,
             token=token_config,
             auto_refresh_kwargs={
-                'client_id': token.app.client_id,
-                'client_secret': token.app.secret,
+                "client_id": token.app.client_id,
+                "client_secret": token.app.secret,
             },
             auto_refresh_url=self.get_adapter().access_token_url,
             token_updater=self.token_updater(token),
@@ -129,12 +134,13 @@ class Service:
         """
 
         def _updater(data):
-            token.token = data['access_token']
+            token.token = data["access_token"]
+            token.token_secret = data.get("refresh_token", "")
             token.expires_at = timezone.make_aware(
-                datetime.fromtimestamp(data['expires_at']),
+                datetime.fromtimestamp(data["expires_at"]),
             )
             token.save()
-            log.info('Updated token.', token=token)
+            log.info("Updated token.", token_id=token.pk)
 
         return _updater
 
@@ -149,7 +155,7 @@ class Service:
         """
         resp = None
         try:
-            resp = self.get_session().get(url, data=kwargs)
+            resp = self.get_session().get(url, params=kwargs)
 
             # TODO: this check of the status_code would be better in the
             # ``create_session`` method since it could be used from outside, but
@@ -160,10 +166,9 @@ class Service:
                 # valid. Probably the user has revoked the access to our App. He
                 # needs to reconnect his account
                 raise SyncServiceError(
-                    'Our access to your {provider} account was revoked. '
-                    'Please, reconnect it from your social account connections.'.format(
-                        provider=self.provider_name,
-                    ),
+                    SyncServiceError.INVALID_OR_REVOKED_ACCESS_TOKEN.format(
+                        provider=self.provider_name
+                    )
                 )
 
             next_url = self.get_next_url_to_paginate(resp)
@@ -173,8 +178,12 @@ class Service:
             return results
         # Catch specific exception related to OAuth
         except InvalidClientIdError:
-            log.warning('access_token or refresh_token failed.', url=url)
-            raise Exception('You should reconnect your account')
+            log.warning("access_token or refresh_token failed.", url=url)
+            raise SyncServiceError(
+                SyncServiceError.INVALID_OR_REVOKED_ACCESS_TOKEN.format(
+                    provider=self.provider_name
+                )
+            )
         # Catch exceptions with request or deserializing JSON
         except (RequestException, ValueError):
             # Response data should always be JSON, still try to log if not
@@ -184,7 +193,7 @@ class Service:
             except ValueError:
                 debug_data = resp.content
             log.debug(
-                'Paginate failed at URL.',
+                "Paginate failed at URL.",
                 url=url,
                 debug_data=debug_data,
             )
@@ -201,54 +210,40 @@ class Service:
           for this user in the current provider
         """
         remote_repositories = self.sync_repositories()
-        remote_organizations, remote_repositories_organizations = self.sync_organizations()
+        (
+            remote_organizations,
+            remote_repositories_organizations,
+        ) = self.sync_organizations()
 
         # Delete RemoteRepository where the user doesn't have access anymore
         # (skip RemoteRepository tied to a Project on this user)
-        all_remote_repositories = remote_repositories + remote_repositories_organizations
-        repository_remote_ids = [r.remote_id for r in all_remote_repositories if r is not None]
+        all_remote_repositories = (
+            remote_repositories + remote_repositories_organizations
+        )
+        repository_remote_ids = [
+            r.remote_id for r in all_remote_repositories if r is not None
+        ]
         (
-            self.user.remote_repository_relations
-            .exclude(
+            self.user.remote_repository_relations.exclude(
                 remote_repository__remote_id__in=repository_remote_ids,
-                remote_repository__vcs_provider=self.vcs_provider_slug
+                remote_repository__vcs_provider=self.vcs_provider_slug,
             )
             .filter(account=self.account)
             .delete()
         )
 
         # Delete RemoteOrganization where the user doesn't have access anymore
-        organization_remote_ids = [o.remote_id for o in remote_organizations if o is not None]
+        organization_remote_ids = [
+            o.remote_id for o in remote_organizations if o is not None
+        ]
         (
-            self.user.remote_organization_relations
-            .exclude(
+            self.user.remote_organization_relations.exclude(
                 remote_organization__remote_id__in=organization_remote_ids,
-                remote_organization__vcs_provider=self.vcs_provider_slug
+                remote_organization__vcs_provider=self.vcs_provider_slug,
             )
             .filter(account=self.account)
             .delete()
         )
-
-    def create_repository(self, fields, privacy=None, organization=None):
-        """
-        Update or create a repository from API response.
-
-        :param fields: dictionary of response data from API
-        :param privacy: privacy level to support
-        :param organization: remote organization to associate with
-        :type organization: RemoteOrganization
-        :rtype: RemoteRepository
-        """
-        raise NotImplementedError
-
-    def create_organization(self, fields):
-        """
-        Update or create remote organization from API response.
-
-        :param fields: dictionary response of data from API
-        :rtype: RemoteOrganization
-        """
-        raise NotImplementedError
 
     def get_next_url_to_paginate(self, response):
         """
@@ -307,7 +302,7 @@ class Service:
         """
         raise NotImplementedError
 
-    def send_build_status(self, build, commit, state, link_to_build=False):
+    def send_build_status(self, build, commit, status):
         """
         Create commit status for project.
 
@@ -315,9 +310,8 @@ class Service:
         :type build: Build
         :param commit: commit sha of the pull/merge request
         :type commit: str
-        :param state: build state failure, pending, or success.
-        :type state: str
-        :param link_to_build: If true, link to the build page regardless the state.
+        :param status: build state failure, pending, or success.
+        :type status: str
         :returns: boolean based on commit status creation was successful or not.
         :rtype: Bool
         """
@@ -336,6 +330,6 @@ class Service:
         """
         # TODO Replace this check by keying project to remote repos
         return (
-            cls.url_pattern is not None and
-            cls.url_pattern.search(project.repo) is not None
+            cls.url_pattern is not None
+            and cls.url_pattern.search(project.repo) is not None
         )

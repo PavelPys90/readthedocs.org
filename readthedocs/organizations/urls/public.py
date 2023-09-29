@@ -1,13 +1,15 @@
 """URLs that don't require login."""
-from django.conf.urls import re_path
+from django.urls import path, re_path
 
 from readthedocs.organizations.views import public as views
 
 urlpatterns = [
-    re_path(
-        r'^verify-email/$',
-        views.OrganizationTemplateView.as_view(template_name='organizations/verify_email.html'),
-        name='organization_verify_email',
+    path(
+        "verify-email/",
+        views.OrganizationTemplateView.as_view(
+            template_name="organizations/verify_email.html"
+        ),
+        name="organization_verify_email",
     ),
     re_path(
         r'^(?P<slug>[\w.-]+)/$',
@@ -27,7 +29,7 @@ urlpatterns = [
     ),
     re_path(
         r'^invite/(?P<hash>[\w.-]+)/redeem/$',
-        views.UpdateOrganizationTeamMember.as_view(),
+        views.RedirectRedeemTeamInvitation.as_view(),
         name='organization_invite_redeem',
     ),
     # Members

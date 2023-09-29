@@ -1,7 +1,7 @@
-Server Side Search Integration
+Server side search integration
 ==============================
 
-Read the Docs provides :doc:`server side search (SSS) <rtd:server-side-search>`
+Read the Docs provides :doc:`server side search (SSS) <rtd:server-side-search/index>`
 in replace of the default search engine of your site.
 To accomplish this, Read the Docs parses the content directly from your HTML pages [*]_.
 
@@ -30,8 +30,9 @@ Read the Docs makes use of ARIA_ roles and other heuristics in order to process 
 Main content node
 ~~~~~~~~~~~~~~~~~
 
-The main content node should have a main role (or a ``main`` tag), and there should only be one per page.
-This node is the one that contains all the page content. Example:
+The main content should be inside a ``<main>`` tag or an element with ``role=main``,
+and there should only be one per page.
+This node is the one that contains all the page content to be indexed. Example:
 
 .. code-block:: html
    :emphasize-lines: 10-12
@@ -55,6 +56,51 @@ This node is the one that contains all the page content. Example:
       </body>
    </html>
 
+If a main node isn't found,
+we try to infer the main node from the parent of the first section with a ``h1`` tag.
+Example:
+
+.. code-block:: html
+   :emphasize-lines: 10-20
+
+   <html>
+      <head>
+         ...
+      </head>
+      <body>
+         <div>
+            This content isn't processed
+         </div>
+
+         <div id="parent">
+            <h1>First title</h1>
+            <p>
+               The parent of the h1 title will
+               be taken as the main node,
+               this is the div tag.
+            </p>
+
+            <h2>Second title</h2>
+            <p>More content</p>
+         </div>
+      </body>
+   </html>
+
+If a section title isn't found, we default to the ``body`` tag.
+Example:
+
+.. code-block:: html
+   :emphasize-lines: 5-7
+
+   <html>
+      <head>
+         ...
+      </head>
+      <body>
+         <p>Content</p>
+      </body>
+   </html>
+
 Irrelevant content
 ~~~~~~~~~~~~~~~~~~
 
@@ -70,6 +116,14 @@ Roles to be ignored:
 Tags to be ignored:
 
 - ``nav``
+
+Special rules that are derived from specific documentation tools applied in the generic parser:
+
+.. https://squidfunk.github.io/mkdocs-material/reference/code-blocks/#adding-line-numbers
+
+- ``.linenos``, ``.lineno`` (line numbers in code-blocks, comes from both MkDocs and Sphinx)
+- ``.headerlink`` (added by Sphinx to links in headers)
+- ``.toctree-wrapper`` (added by Sphinx to the table of contents generated from the ``toctree`` directive)
 
 Example:
 
@@ -87,12 +141,30 @@ Example:
 Sections
 ~~~~~~~~
 
-Sections are ``h`` tags, and sections of the same level should be neighbors.
-Additionally, sections should have an unique ``id`` attribute per page (this is used to link to the section).
-All content below the section, till the new section will be indexed as part of the section. Example:
+Sections are stored in a dictionary composed of an ``id``, ``title`` and ``content`` key.
+
+Sections are defined as:
+
+* ``h1-h7``, all content between one heading level and the next header on the same level is used as content for that section.
+* ``dt`` elements with an ``id`` attribute, we map the ``title`` to the ``dt`` element and the content to the ``dd`` element.
+
+All sections have to be identified by a DOM container's ``id`` attribute,
+which will be used to link to the section.
+How the id is detected varies with the type of element:
+
+* ``h1-h7`` elements use the ``id`` attribute of the header itself if present, or
+  its ``section`` parent (if exists).
+* ``dt`` elements use the ``id`` attribute of the ``dt`` element.
+
+To avoid duplication and ambiguous section references,
+all indexed ``dl`` elements are removed from the DOM before indexing of other sections happen.
+
+Here is an example of how all content below the title,
+until a new section is found,
+will be indexed as part of the section content:
 
 .. code-block:: html
-   :emphasize-lines: 2-10
+   :emphasize-lines: 2-10, 12-17, 21-26
 
    <div role="main">
       <h1 id="section-title">
@@ -114,17 +186,17 @@ All content below the section, till the new section will be indexed as part of t
 
       ...
 
-      <h1 id="neigbor-section">
-         This section is neighbor of "section-title"
-      </h1>
+      <header>
+         <h1 id="3">This is also a valid section title</h1>
+      </header>
       <p>
-         ...
+         Thi is the content of the third section.
       </p>
    </div>
 
-Sections can be inside till two nested tags (and have nested sections),
-and its immediate parent can contain the ``id`` attribute.
-Note that the section content still needs to be below the ``h`` tag. Example:
+Sections can be contained in up to two nested tags, and can contain other sections (nested sections).
+Note that the section content still needs to be below the section title.
+Example:
 
 .. code-block:: html
    :emphasize-lines: 3-11,14-21
@@ -201,14 +273,9 @@ Other special nodes
 Overriding the default search
 -----------------------------
 
-Static sites usually have their own static index,
-and search results are retrieved via JavaScript.
-In order for Read the Docs to override the default search as expected,
-themes from the supported generators must follow these conventions.
-
-.. note::
-
-   Read the Docs will fallback to the original search in case of an error or no results.
+Static sites usually have their own static search index, and search results are retrieved via JavaScript.
+Read the Docs overrides the default search for Sphinx projects only,
+and provides a fallback to the original search in case of an error or no results.
 
 Sphinx
 ~~~~~~
@@ -246,70 +313,15 @@ If your theme works with the search from the basic theme, it will work with Read
 
 .. _`static/searchtools.js`: https://github.com/sphinx-doc/sphinx/blob/275d9/sphinx/themes/basic/static/searchtools.js
 
-MkDocs
-~~~~~~
+Other static site generators
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Search on MkDocs is provided by the `search plugin`_, which is included (and activated) by default in MkDocs.
-The js part of this plugin is included in the `templates/search/main.js`_ file,
-which subscribes to the ``keyup`` event of the ``#mkdocs-search-query`` element
-to call the ``doSearch`` function (available on MkDocs >= 1.x) on every key press.
-
-Read the Docs overrides the ``initSearch`` and ``doSearch`` functions
-to subscribe to the ``keyup`` event of the ``#mkdocs-search-query`` element,
-and puts the results into the ``#mkdocs-search-results`` element.
-A simplified example looks like this:
-
-.. code-block:: js
-
-   var original_search = doSearch;
-
-   function search_override() {
-      var query = document.getElementById('mkdocs-search-query').value;
-      var search_results = document.getElementById('mkdocs-search-results');
-
-      var results = fetch_resuls(query);
-      if (results) {
-         empty_results(search_results)
-         for (var i = 0; i < results.length; i += 1) {
-            var result = process_result(results[i]);
-            append_result(result, search_results);
-         }
-      } else {
-         original_search();
-      }
-   }
-
-   var init_override = function () {
-      var search_input = document.getElementById('mkdocs-search-query');
-      search_input.addEventListener('keyup', doSearch);
-   };
-
-   window.doSearch = search_override;
-   window.initSearch = init_override;
-
-   initSearch();
-
-Highlights from results will be in a ``mark`` tag (``This is a <mark>result</mark>``).
-If your theme works with the search plugin of MkDocs,
-and defines the ``#mkdocs-search-query`` and ``#mkdocs-search-results`` elements,
-it will work with Read the Docs' SSS.
-
-.. note::
-
-   Since the ``templates/search/main.js`` file is included after our custom search,
-   it will subscribe to the ``keyup`` event too, triggering both functions when a key is pressed
-   (but ours should have more precedence).
-   This can be fixed by not including the ``search`` plugin (you won't be able to fallback to the original search),
-   or by creating a custom plugin to include our search at the end (this should be done by Read the Docs).
-
-.. _`search plugin`: https://www.mkdocs.org/user-guide/configuration/#search
-.. _`templates/search/main.js`: https://github.com/mkdocs/mkdocs/blob/ff0b72/mkdocs/contrib/search/templates/search/main.js
+All projects that have HTML pages that follow the conventions described in this document
+can make use of the server side search from the dashboard or by calling the API.
 
 Supporting more themes and static site generators
 -------------------------------------------------
 
-Currently, Read the Docs supports building documentation from
-:doc:`Sphinx <rtd:intro/getting-started-with-sphinx>` and :doc:`MkDocs <rtd:intro/getting-started-with-mkdocs>`.
 All themes that follow these conventions should work as expected.
 If you think other generators or other conventions should be supported,
 or content that should be ignored or have an especial treatment,

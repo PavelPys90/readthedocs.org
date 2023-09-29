@@ -9,7 +9,9 @@ from crispy_forms.layout import HTML, Fieldset, Layout, Submit
 from django import forms
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.db.models import Q
 from django.template.loader import render_to_string
+from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
 from readthedocs.builds.constants import INTERNAL
@@ -17,8 +19,10 @@ from readthedocs.core.history import SimpleHistoryModelForm
 from readthedocs.core.utils import slugify, trigger_build
 from readthedocs.core.utils.extend import SettingsOverrideObject
 from readthedocs.integrations.models import Integration
+from readthedocs.invitations.models import Invitation
 from readthedocs.oauth.models import RemoteRepository
 from readthedocs.projects.models import (
+    AddonsConfig,
     Domain,
     EmailHook,
     EnvironmentVariable,
@@ -83,7 +87,7 @@ class ProjectBasicsForm(ProjectForm):
 
     class Meta:
         model = Project
-        fields = ('name', 'repo', 'repo_type', 'default_branch')
+        fields = ("name", "repo", "default_branch", "language")
 
     remote_repository = forms.IntegerField(
         widget=forms.HiddenInput(),
@@ -91,13 +95,7 @@ class ProjectBasicsForm(ProjectForm):
     )
 
     def __init__(self, *args, **kwargs):
-        show_advanced = kwargs.pop('show_advanced', False)
         super().__init__(*args, **kwargs)
-        if show_advanced:
-            self.fields['advanced'] = forms.BooleanField(
-                required=False,
-                label=_('Edit advanced project options'),
-            )
         self.fields['repo'].widget.attrs['placeholder'] = self.placehold_repo()
         self.fields['repo'].widget.attrs['required'] = True
 
@@ -140,8 +138,8 @@ class ProjectBasicsForm(ProjectForm):
                 pk=remote_repo,
                 users=self.user,
             )
-        except RemoteRepository.DoesNotExist:
-            raise forms.ValidationError(_('Repository invalid'))
+        except RemoteRepository.DoesNotExist as exc:
+            raise forms.ValidationError(_("Repository invalid")) from exc
 
     def placehold_repo(self):
         return choice([
@@ -188,6 +186,16 @@ class ProjectExtraForm(ProjectForm):
         return tags
 
 
+class ProjectConfigForm(forms.Form):
+
+    """Simple intermediate step to communicate about the .readthedocs.yaml file."""
+
+    def __init__(self, *args, **kwargs):
+        # Remove 'user' field since it's not expected by BaseForm.
+        kwargs.pop("user")
+        super().__init__(*args, **kwargs)
+
+
 class ProjectAdvancedForm(ProjectTriggerBuildMixin, ProjectForm):
 
     """Advanced project option form."""
@@ -195,15 +203,16 @@ class ProjectAdvancedForm(ProjectTriggerBuildMixin, ProjectForm):
     class Meta:
         model = Project
         per_project_settings = (
-            'default_version',
-            'default_branch',
-            'privacy_level',
-            'analytics_code',
-            'analytics_disabled',
-            'show_version_warning',
-            'single_version',
-            'external_builds_enabled',
-            'external_builds_privacy_level',
+            "default_version",
+            "default_branch",
+            "privacy_level",
+            "analytics_code",
+            "analytics_disabled",
+            "show_version_warning",
+            "single_version",
+            "external_builds_enabled",
+            "external_builds_privacy_level",
+            "readthedocs_yaml_path",
         )
         # These that can be set per-version using a config file.
         per_version_settings = (
@@ -211,7 +220,6 @@ class ProjectAdvancedForm(ProjectTriggerBuildMixin, ProjectForm):
             'requirements_file',
             'python_interpreter',
             'install_project',
-            'use_system_packages',
             'conf_py_file',
             'enable_pdf_build',
             'enable_epub_build',
@@ -234,6 +242,14 @@ class ProjectAdvancedForm(ProjectTriggerBuildMixin, ProjectForm):
         )
 
         per_project_settings = list(self.Meta.per_project_settings)
+
+        # NOTE: we are deprecating this feature.
+        # However, we will keep it available for projects that already using it.
+        # Old projects not using it already or new projects won't be able to enable.
+        if not self.instance.has_feature(Feature.ALLOW_VERSION_WARNING_BANNER):
+            self.fields.pop("show_version_warning")
+            per_project_settings.remove("show_version_warning")
+
         if not settings.ALLOW_PRIVATE_REPOS:
             for field in ['privacy_level', 'external_builds_privacy_level']:
                 self.fields.pop(field)
@@ -272,15 +288,97 @@ class ProjectAdvancedForm(ProjectTriggerBuildMixin, ProjectForm):
         else:
             self.fields['default_version'].widget.attrs['readonly'] = True
 
+        self.setup_external_builds_option()
+
+    def setup_external_builds_option(self):
+        """Disable the external builds option if the project doesn't meet the requirements."""
+        integrations = list(self.instance.integrations.all())
+        has_supported_integration = self.has_supported_integration(integrations)
+        can_build_external_versions = self.can_build_external_versions(integrations)
+
+        # External builds are supported for this project,
+        # don't disable the option.
+        if has_supported_integration and can_build_external_versions:
+            return
+
+        msg = None
+        url = reverse("projects_integrations", args=[self.instance.slug])
+        if not has_supported_integration:
+            msg = _(
+                "To build from pull requests you need a "
+                f'GitHub or GitLab <a href="{url}">integration</a>.'
+            )
+        if has_supported_integration and not can_build_external_versions:
+            # If there is only one integration, link directly to it.
+            if len(integrations) == 1:
+                url = reverse(
+                    "projects_integrations_detail",
+                    args=[self.instance.slug, integrations[0].pk],
+                )
+            msg = _(
+                "To build from pull requests your repository's webhook "
+                "needs to send pull request events. "
+                f'Try to <a href="{url}">resync your integration</a>.'
+            )
+
+        if msg:
+            field = self.fields["external_builds_enabled"]
+            field.disabled = True
+            field.help_text = f"{msg} {field.help_text}"
+
+    def has_supported_integration(self, integrations):
+        supported_types = {Integration.GITHUB_WEBHOOK, Integration.GITLAB_WEBHOOK}
+        for integration in integrations:
+            if integration.integration_type in supported_types:
+                return True
+        return False
+
+    def can_build_external_versions(self, integrations):
+        """
+        Check if external versions can be enabled for this project.
+
+        A project can build external versions if:
+
+        - They are using GitHub or GitLab.
+        - The repository's webhook is setup to send pull request events.
+
+        If the integration's provider data isn't set,
+        it could mean that the user created the integration manually,
+        and doesn't have an account connected.
+        So we don't know for sure if the webhook is sending pull request events.
+        """
+        for integration in integrations:
+            provider_data = integration.provider_data
+            if integration.integration_type == Integration.GITHUB_WEBHOOK and (
+                not provider_data or "pull_request" in provider_data.get("events", [])
+            ):
+                return True
+            if integration.integration_type == Integration.GITLAB_WEBHOOK and (
+                not provider_data or provider_data.get("merge_requests_events")
+            ):
+                return True
+        return False
+
     def clean_conf_py_file(self):
-        filename = self.cleaned_data.get('conf_py_file', '').strip()
-        if filename and 'conf.py' not in filename:
+        filename = self.cleaned_data.get("conf_py_file", "").strip()
+        if filename and "conf.py" not in filename:
             raise forms.ValidationError(
                 _(
                     'Your configuration file is invalid, make sure it contains '
                     'conf.py in it.',
                 ),
             )  # yapf: disable
+        return filename
+
+    def clean_readthedocs_yaml_path(self):
+        """
+        Validate user input to help user.
+
+        We also validate this path during the build process, so this validation step is
+        only considered as helpful to a user, not a security measure.
+        """
+        filename = self.cleaned_data.get("readthedocs_yaml_path")
+        filename = (filename or "").strip()
         return filename
 
     def get_all_active_versions(self):
@@ -305,13 +403,15 @@ class UpdateProjectForm(
         ProjectExtraForm,
 ):
 
-    class Meta:
+    """Basic project settings form for Admin."""
+
+    class Meta:  # noqa
         model = Project
         fields = (
             # Basics
             'name',
             'repo',
-            'repo_type',
+            "repo_type",
             # Extra
             'description',
             'language',
@@ -321,6 +421,7 @@ class UpdateProjectForm(
         )
 
     def clean_language(self):
+        """Ensure that language isn't already active."""
         language = self.cleaned_data['language']
         project = self.instance
         if project:
@@ -359,7 +460,7 @@ class ProjectRelationshipForm(forms.ModelForm):
 
     class Meta:
         model = ProjectRelationship
-        fields = '__all__'
+        fields = "__all__"
 
     def __init__(self, *args, **kwargs):
         self.project = kwargs.pop('project')
@@ -393,29 +494,65 @@ class ProjectRelationshipForm(forms.ModelForm):
         return alias
 
 
-class UserForm(forms.Form):
+class AddonsConfigForm(forms.ModelForm):
 
-    """Project user association form."""
+    """Form to opt-in into new beta addons."""
 
-    user = forms.CharField()
+    project = forms.CharField(widget=forms.HiddenInput(), required=False)
+
+    class Meta:
+        model = AddonsConfig
+        fields = ("enabled", "project")
 
     def __init__(self, *args, **kwargs):
-        self.project = kwargs.pop('project', None)
+        self.project = kwargs.pop("project", None)
+        kwargs["instance"] = getattr(self.project, "addons", None)
         super().__init__(*args, **kwargs)
 
-    def clean_user(self):
-        name = self.cleaned_data['user']
-        user_qs = User.objects.filter(username=name)
-        if not user_qs.exists():
+        try:
+            self.fields["enabled"].initial = self.project.addons.enabled
+        except AddonsConfig.DoesNotExist:
+            self.fields["enabled"].initial = False
+
+    def clean_project(self):
+        return self.project
+
+
+class UserForm(forms.Form):
+
+    """Project owners form."""
+
+    username_or_email = forms.CharField(label=_("Email address or username"))
+
+    def __init__(self, *args, **kwargs):
+        self.project = kwargs.pop("project", None)
+        self.request = kwargs.pop("request", None)
+        super().__init__(*args, **kwargs)
+
+    def clean_username_or_email(self):
+        username = self.cleaned_data["username_or_email"]
+        user = User.objects.filter(
+            Q(username=username)
+            | Q(emailaddress__verified=True, emailaddress__email=username)
+        ).first()
+        if not user:
             raise forms.ValidationError(
-                _('User {name} does not exist').format(name=name),
+                _("User %(username)s does not exist"), params={"username": username}
             )
-        self.user = user_qs[0]
-        return name
+        if self.project.users.filter(pk=user.pk).exists():
+            raise forms.ValidationError(
+                _("User %(username)s is already a maintainer"),
+                params={"username": username},
+            )
+        return user
 
     def save(self):
-        self.project.users.add(self.user)
-        return self.user
+        invitation, _ = Invitation.objects.invite(
+            from_user=self.request.user,
+            to_user=self.cleaned_data["username_or_email"],
+            obj=self.project,
+        )
+        return invitation
 
 
 class EmailHookForm(forms.Form):
@@ -441,6 +578,8 @@ class EmailHookForm(forms.Form):
 
 
 class WebHookForm(forms.ModelForm):
+
+    """Webhook form."""
 
     project = forms.CharField(widget=forms.HiddenInput(), required=False)
 
@@ -482,8 +621,10 @@ class WebHookForm(forms.ModelForm):
         try:
             payload = json.loads(payload)
             payload = json.dumps(payload, indent=2)
-        except Exception:
-            raise forms.ValidationError(_('The payload must be a valid JSON object.'))
+        except Exception as exc:
+            raise forms.ValidationError(
+                _("The payload must be a valid JSON object.")
+            ) from exc
         return payload
 
 
@@ -509,6 +650,8 @@ class TranslationBaseForm(forms.Form):
         ) for project in self.get_translation_queryset().all()]
 
     def clean_project(self):
+        """Ensures that selected project is valid as a translation."""
+
         translation_project_slug = self.cleaned_data['project']
 
         # Ensure parent project isn't already itself a translation
@@ -583,28 +726,29 @@ class RedirectForm(forms.ModelForm):
 
     """Form for project redirects."""
 
+    project = forms.CharField(widget=forms.HiddenInput(), required=False, disabled=True)
+
     class Meta:
         model = Redirect
-        fields = ['redirect_type', 'from_url', 'to_url']
+        fields = ["project", "redirect_type", "from_url", "to_url", "force"]
 
     def __init__(self, *args, **kwargs):
         self.project = kwargs.pop('project', None)
         super().__init__(*args, **kwargs)
 
-    def save(self, **_):  # pylint: disable=arguments-differ
-        # TODO this should respect the unused argument `commit`. It's not clear
-        # why this needs to be a call to `create`, instead of relying on the
-        # super `save()` call.
-        redirect = Redirect.objects.create(
-            project=self.project,
-            redirect_type=self.cleaned_data['redirect_type'],
-            from_url=self.cleaned_data['from_url'],
-            to_url=self.cleaned_data['to_url'],
-        )
-        return redirect
+        if self.project.has_feature(Feature.ALLOW_FORCED_REDIRECTS):
+            # Remove the nullable option from the form.
+            # TODO: remove after migration.
+            self.fields["force"].widget = forms.CheckboxInput()
+            self.fields["force"].empty_value = False
+        else:
+            self.fields.pop("force")
+
+    def clean_project(self):
+        return self.project
 
 
-class DomainBaseForm(forms.ModelForm):
+class DomainForm(forms.ModelForm):
 
     """Form to configure a custom domain name for a project."""
 
@@ -619,14 +763,20 @@ class DomainBaseForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
 
         # Disable domain manipulation on Update, but allow on Create
-        instance = getattr(self, 'instance', None)
-        if instance and instance.pk:
+        if self.instance.pk:
             self.fields['domain'].disabled = True
+
+        # Remove the https option at creation,
+        # but show it if the domain is already marked as http only,
+        # so users can upgrade.
+        if not self.instance.pk or self.instance.https:
+            self.fields.pop("https")
 
     def clean_project(self):
         return self.project
 
     def clean_domain(self):
+        """Validates domain."""
         domain = self.cleaned_data['domain'].lower()
         parsed = urlparse(domain)
 
@@ -666,10 +816,6 @@ class DomainBaseForm(forms.ModelForm):
         return canonical
 
 
-class DomainForm(SettingsOverrideObject):
-    _default_class = DomainBaseForm
-
-
 class IntegrationForm(forms.ModelForm):
 
     """
@@ -682,7 +828,10 @@ class IntegrationForm(forms.ModelForm):
 
     class Meta:
         model = Integration
-        exclude = ['provider_data', 'exchanges', 'secret']  # pylint: disable=modelform-uses-exclude
+        fields = [
+            'project',
+            'integration_type',
+        ]
 
     def __init__(self, *args, **kwargs):
         self.project = kwargs.pop('project', None)
@@ -762,6 +911,7 @@ class EnvironmentVariableForm(forms.ModelForm):
         return self.project
 
     def clean_name(self):
+        """Validate environment variable name chosen."""
         name = self.cleaned_data['name']
         if name.startswith('__'):
             raise forms.ValidationError(

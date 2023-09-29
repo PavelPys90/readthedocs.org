@@ -1,21 +1,21 @@
-Conda Support
-=============
+How to use Conda as your Python environment
+===========================================
 
 Read the Docs supports Conda as an environment management tool,
 along with Virtualenv.
 Conda support is useful for people who depend on C libraries,
 and need them installed when building their documentation.
 
-This work was funded by `Clinical Graphics`_ -- many thanks for their support of Open Source.
+This work was funded by `Clinical Graphics`_ -- many thanks for their support of open source.
 
 .. _Clinical Graphics: https://www.clinicalgraphics.com/
 
-Activating Conda
+Activating conda
 ----------------
 
 Conda support is available using a :doc:`../config-file/index`, see :ref:`config-file/v2:conda`.
 
-Our :ref:`Docker images <builds:Docker images>` use Miniconda, a minimal conda installer.
+Our Docker images use Miniconda, a minimal conda installer.
 After specifying your project requirements using a conda ``environment.yml`` file,
 Read the Docs will create the environment (using ``conda env create``)
 and add the core dependencies needed to build the documentation.
@@ -28,7 +28,7 @@ There are several ways of `exporting a conda environment`_:
 - ``conda env export`` will produce a complete list of all the packages installed in the environment
   with their exact versions. This is the best option to ensure reproducibility,
   but can create problems if done from a different operative system than the target machine,
-  in our case Ubuntu Linux (check out our :ref:`Docker images <builds:Docker images>` for further information).
+  in our case Ubuntu Linux.
 - ``conda env export --from-history`` will only include packages that were explicitly requested
   in the environment, excluding the transitive dependencies. This is the best option to maximize
   cross-platform compatibility, however it may include packages that are not needed to build your docs.
@@ -58,11 +58,6 @@ so they can have any value, or not be present at all.
 .. tip:: Bear in mind that ``rasterio==1.2`` (double ``==``) will install version ``1.2.0``,
    whereas ``python=3.8`` (single ``=``) will fetch the latest ``3.8.*`` version,
    which is ``3.8.8`` at the time of writing.
-
-.. warning:: Pinning Sphinx and other Read the Docs core dependencies
-   is not yet supported by default when using conda (see `this GitHub issue for discussion`_).
-   If your project needs it, request that we enable the ``CONDA_APPEND_CORE_REQUIREMENTS``
-   :ref:`feature flag <feature-flags:Feature Flags>`.
 
 .. _this GitHub issue for discussion: https://github.com/readthedocs/readthedocs.org/issues/3829
 .. _exporting a conda environment: https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html#sharing-an-environment
@@ -126,7 +121,7 @@ with these contents:
    build:
      os: "ubuntu-20.04"
      tools:
-       python: "mambaforge-4.10"
+       python: "mambaforge-22.9"
 
    conda:
      environment: environment.yml
@@ -134,7 +129,7 @@ with these contents:
 You can read more about the :ref:`config-file/v2:build.tools.python` configuration
 in our documentation.
 
-.. _mamba: https://quantstack.net/mamba.html
+.. _mamba: https://github.com/mamba-org/mamba
 .. _a known issue: https://www.anaconda.com/understanding-and-improving-condas-performance/
 
 Mixing conda and pip packages
@@ -175,7 +170,7 @@ Compiling your project sources
 
 If your project contains extension modules written in a compiled language (C, C++, FORTRAN)
 or server-side JavaScript, you might need special tools to build it from source
-that are not readily available on our :ref:`Docker images <builds:Docker images>`,
+that are not readily available on our Docker images,
 such as a suitable compiler, CMake, Node.js, and others.
 
 Luckily, conda is a language-agnostic package manager, and many of these development tools

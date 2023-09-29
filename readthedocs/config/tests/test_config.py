@@ -1,11 +1,12 @@
 import os
-from django.conf import settings
 import re
 import textwrap
 from collections import OrderedDict
 from unittest.mock import DEFAULT, patch
 
 import pytest
+from django.conf import settings
+from django.test import override_settings
 from pytest import raises
 
 from readthedocs.config import (
@@ -15,8 +16,8 @@ from readthedocs.config import (
     BuildConfigV1,
     BuildConfigV2,
     ConfigError,
-    ConfigFileNotFound,
     ConfigOptionNotSupportedError,
+    DefaultConfigFileNotFound,
     InvalidConfig,
     load,
 )
@@ -33,7 +34,8 @@ from readthedocs.config.config import (
 )
 from readthedocs.config.models import (
     Build,
-    BuildWithTools,
+    BuildJobs,
+    BuildWithOs,
     Conda,
     PythonInstall,
     PythonInstallRequirements,
@@ -78,8 +80,9 @@ def get_build_config(config, env_config=None, source_file='readthedocs.yml'):
 def test_load_no_config_file(tmpdir, files):
     apply_fs(tmpdir, files)
     base = str(tmpdir)
-    with raises(ConfigFileNotFound) as e:
-        load(base, {})
+    with raises(DefaultConfigFileNotFound) as e:
+        with override_settings(DOCROOT=tmpdir):
+            load(base, {})
     assert e.value.code == CONFIG_FILE_REQUIRED
 
 
@@ -91,13 +94,15 @@ def test_load_empty_config_file(tmpdir):
     )
     base = str(tmpdir)
     with raises(ConfigError):
-        load(base, {})
+        with override_settings(DOCROOT=tmpdir):
+            load(base, {})
 
 
 def test_minimal_config(tmpdir):
     apply_fs(tmpdir, yaml_config_dir)
     base = str(tmpdir)
-    build = load(base, {})
+    with override_settings(DOCROOT=tmpdir):
+        build = load(base, {})
     assert isinstance(build, BuildConfigV1)
 
 
@@ -110,7 +115,8 @@ def test_load_version1(tmpdir):
         },
     )
     base = str(tmpdir)
-    build = load(base, {})
+    with override_settings(DOCROOT=tmpdir):
+        build = load(base, {})
     assert isinstance(build, BuildConfigV1)
 
 
@@ -123,7 +129,8 @@ def test_load_version2(tmpdir):
         },
     )
     base = str(tmpdir)
-    build = load(base, {})
+    with override_settings(DOCROOT=tmpdir):
+        build = load(base, {})
     assert isinstance(build, BuildConfigV2)
 
 
@@ -137,7 +144,8 @@ def test_load_unknow_version(tmpdir):
     )
     base = str(tmpdir)
     with raises(ConfigError) as excinfo:
-        load(base, {})
+        with override_settings(DOCROOT=tmpdir):
+            load(base, {})
     assert excinfo.value.code == VERSION_INVALID
 
 
@@ -158,7 +166,8 @@ def test_load_raise_exception_invalid_syntax(tmpdir):
     )
     base = str(tmpdir)
     with raises(ConfigError) as excinfo:
-        load(base, {})
+        with override_settings(DOCROOT=tmpdir):
+            load(base, {})
     assert excinfo.value.code == CONFIG_SYNTAX_INVALID
 
 
@@ -175,14 +184,77 @@ def test_yaml_extension(tmpdir):
         },
     )
     base = str(tmpdir)
-    config = load(base, {})
+    with override_settings(DOCROOT=tmpdir):
+        config = load(base, {})
     assert isinstance(config, BuildConfigV1)
 
 
 def test_build_config_has_source_file(tmpdir):
     base = str(apply_fs(tmpdir, yaml_config_dir))
-    build = load(base, {})
+    with override_settings(DOCROOT=tmpdir):
+        build = load(base, {})
     assert build.source_file == os.path.join(base, 'readthedocs.yml')
+
+
+def test_load_non_default_filename(tmpdir):
+    """
+    Load a config file name with a non-default name.
+
+    Verifies that we can load a custom config path and that an existing default config file is
+    correctly ignored.
+
+    Note: Our CharField validator for readthedocs_yaml_path currently ONLY allows a file to be
+    called .readthedocs.yaml.
+    This test just verifies that the loader doesn't care since we support different file names
+    in the backend.
+    """
+    non_default_filename = "myconfig.yaml"
+    apply_fs(
+        tmpdir,
+        {
+            non_default_filename: textwrap.dedent(
+                """
+                version: 2
+                """
+            ),
+            ".readthedocs.yaml": "illegal syntax but should not load",
+        },
+    )
+    base = str(tmpdir)
+    with override_settings(DOCROOT=tmpdir):
+        build = load(base, {}, readthedocs_yaml_path="myconfig.yaml")
+    assert isinstance(build, BuildConfigV2)
+    assert build.source_file == os.path.join(base, non_default_filename)
+
+
+def test_load_non_yaml_extension(tmpdir):
+    """
+    Load a config file name from non-default path.
+
+    In this version, we verify that we can handle non-yaml extensions
+    because we allow the user to do that.
+
+    See docstring of test_load_non_default_filename.
+    """
+    non_default_filename = ".readthedocs.skrammel"
+    apply_fs(
+        tmpdir,
+        {
+            "subdir": {
+                non_default_filename: textwrap.dedent(
+                    """
+                    version: 2
+                    """
+                ),
+            },
+            ".readthedocs.yaml": "illegal syntax but should not load",
+        },
+    )
+    base = str(tmpdir)
+    with override_settings(DOCROOT=tmpdir):
+        build = load(base, {}, readthedocs_yaml_path="subdir/.readthedocs.skrammel")
+    assert isinstance(build, BuildConfigV2)
+    assert build.source_file == os.path.join(base, "subdir/.readthedocs.skrammel")
 
 
 def test_build_config_has_list_with_single_empty_value(tmpdir):
@@ -195,7 +267,8 @@ def test_build_config_has_list_with_single_empty_value(tmpdir):
             ),
         },
     ))
-    build = load(base, {})
+    with override_settings(DOCROOT=tmpdir):
+        build = load(base, {})
     assert isinstance(build, BuildConfigV1)
     assert build.formats == []
 
@@ -232,24 +305,6 @@ def test_python_section_must_be_dict():
     assert excinfo.value.code == PYTHON_INVALID
 
 
-def test_use_system_site_packages_defaults_to_false():
-    build = get_build_config({'python': {}})
-    build.validate()
-    # Default is False.
-    assert not build.python.use_system_site_packages
-
-
-@pytest.mark.parametrize('value', [True, False])
-def test_use_system_site_packages_repects_default_value(value):
-    defaults = {
-        'use_system_packages': value,
-    }
-    build = get_build_config({}, {'defaults': defaults})
-    build.validate()
-    assert build.python.use_system_site_packages is value
-
-
-
 class TestValidatePythonExtraRequirements:
 
     def test_it_defaults_to_install_requirements_as_none(self):
@@ -282,32 +337,6 @@ class TestValidatePythonExtraRequirements:
         )
         build.validate()
         validate_string.assert_any_call('tests')
-
-
-class TestValidateUseSystemSitePackages:
-
-    def test_it_defaults_to_false(self):
-        build = get_build_config({'python': {}})
-        build.validate()
-        assert build.python.use_system_site_packages is False
-
-    def test_it_validates_value(self):
-        build = get_build_config(
-            {'python': {'use_system_site_packages': 'invalid'}},
-        )
-        with raises(InvalidConfig) as excinfo:
-            build.validate()
-        excinfo.value.key = 'python.use_system_site_packages'
-        excinfo.value.code = INVALID_BOOL
-
-    @patch('readthedocs.config.config.validate_bool')
-    def test_it_uses_validate_bool(self, validate_bool):
-        validate_bool.return_value = True
-        build = get_build_config(
-            {'python': {'use_system_site_packages': 'to-validate'}},
-        )
-        build.validate()
-        validate_bool.assert_any_call('to-validate')
 
 
 class TestValidateSetupPyInstall:
@@ -356,15 +385,6 @@ class TestValidatePythonVersion:
         assert build.python.version == '3.7'
         assert build.python_interpreter == 'python3.7'
         assert build.python_full_version == '3.7'
-
-    def test_it_supports_string_versions(self):
-        build = get_build_config(
-            {'python': {'version': 'pypy3.5'}},
-        )
-        build.validate()
-        assert build.python.version == 'pypy3.5'
-        assert build.python_interpreter == 'pypy3.5'
-        assert build.python_full_version == 'pypy3.5'
 
     def test_it_validates_versions_out_of_range(self):
         build = get_build_config(
@@ -681,7 +701,8 @@ def test_load_calls_validate(tmpdir):
     apply_fs(tmpdir, yaml_config_dir)
     base = str(tmpdir)
     with patch.object(BuildConfigV1, 'validate') as build_validate:
-        load(base, {})
+        with override_settings(DOCROOT=tmpdir):
+            load(base, {})
         assert build_validate.call_count == 1
 
 
@@ -731,7 +752,6 @@ def test_as_dict(tmpdir):
             'install': [{
                 'requirements': 'requirements.txt',
             }],
-            'use_system_site_packages': False,
         },
         'build': {
             'image': 'readthedocs/build:latest',
@@ -782,7 +802,7 @@ class TestBuildConfigV2:
             build.error(key='key', message='Message', code='code')
         # We don't have any extra information about
         # the source_file.
-        assert str(excinfo.value) == 'Invalid "key": Message'
+        assert str(excinfo.value) == 'Invalid configuration option "key": Message'
 
     def test_formats_check_valid(self):
         build = self.get_build_config({'formats': ['htmlzip', 'pdf', 'epub']})
@@ -977,7 +997,7 @@ class TestBuildConfigV2:
         )
         build.validate()
         assert build.using_build_tools
-        assert isinstance(build.build, BuildWithTools)
+        assert isinstance(build.build, BuildWithOs)
         assert build.build.os == 'ubuntu-20.04'
         assert build.build.tools['python'].version == '3.9'
         full_version = settings.RTD_DOCKER_BUILD_SETTINGS['tools']['python']['3.9']
@@ -1011,6 +1031,164 @@ class TestBuildConfigV2:
         with raises(InvalidConfig) as excinfo:
             build.validate()
         assert excinfo.value.key == 'python.version'
+
+    def test_commands_build_config_tools_and_commands_valid(self):
+        """
+        Test that build.tools and build.commands are valid together.
+        """
+        build = self.get_build_config(
+            {
+                "build": {
+                    "os": "ubuntu-20.04",
+                    "tools": {"python": "3.8"},
+                    "commands": ["pip install pelican", "pelican content"],
+                },
+            },
+        )
+        build.validate()
+        assert isinstance(build.build, BuildWithOs)
+        assert build.build.commands == ["pip install pelican", "pelican content"]
+
+    def test_build_jobs_without_build_os_is_invalid(self):
+        """
+        build.jobs can't be used without build.os
+        """
+        build = self.get_build_config(
+            {
+                "build": {
+                    "tools": {"python": "3.8"},
+                    "jobs": {
+                        "pre_checkout": ["echo pre_checkout"],
+                    },
+                },
+            },
+        )
+        with raises(InvalidConfig) as excinfo:
+            build.validate()
+        assert excinfo.value.key == "build.os"
+
+    def test_commands_build_config_invalid_command(self):
+        build = self.get_build_config(
+            {
+                "build": {
+                    "os": "ubuntu-20.04",
+                    "tools": {"python": "3.8"},
+                    "commands": "command as string",
+                },
+            },
+        )
+        with raises(InvalidConfig) as excinfo:
+            build.validate()
+        assert excinfo.value.key == "build.commands"
+
+    def test_commands_build_config_invalid_no_os(self):
+        build = self.get_build_config(
+            {
+                "build": {
+                    "commands": ["pip install pelican", "pelican content"],
+                },
+            },
+        )
+        with raises(InvalidConfig) as excinfo:
+            build.validate()
+        assert excinfo.value.key == "build.os"
+
+    def test_commands_build_config_valid(self):
+        """It's valid to build with just build.os and build.commands."""
+        build = self.get_build_config(
+            {
+                "build": {
+                    "os": "ubuntu-22.04",
+                    "commands": ["echo 'hello world' > _readthedocs/html/index.html"],
+                },
+            },
+        )
+        build.validate()
+        assert isinstance(build.build, BuildWithOs)
+        assert build.build.commands == [
+            "echo 'hello world' > _readthedocs/html/index.html"
+        ]
+
+    @pytest.mark.parametrize("value", ["", None, "pre_invalid"])
+    def test_jobs_build_config_invalid_jobs(self, value):
+        build = self.get_build_config(
+            {
+                "build": {
+                    "os": "ubuntu-20.04",
+                    "tools": {"python": "3.8"},
+                    "jobs": {value: ["echo 1234", "git fetch --unshallow"]},
+                },
+            },
+        )
+        with raises(InvalidConfig) as excinfo:
+            build.validate()
+        assert excinfo.value.key == "build.jobs"
+
+    @pytest.mark.parametrize("value", ["", None, "echo 123", 42])
+    def test_jobs_build_config_invalid_job_commands(self, value):
+        build = self.get_build_config(
+            {
+                "build": {
+                    "os": "ubuntu-20.04",
+                    "tools": {"python": "3.8"},
+                    "jobs": {
+                        "pre_install": value,
+                    },
+                },
+            },
+        )
+        with raises(InvalidConfig) as excinfo:
+            build.validate()
+        assert excinfo.value.key == "build.jobs.pre_install"
+
+    def test_jobs_build_config(self):
+        build = self.get_build_config(
+            {
+                "build": {
+                    "os": "ubuntu-20.04",
+                    "tools": {"python": "3.8"},
+                    "jobs": {
+                        "pre_checkout": ["echo pre_checkout"],
+                        "post_checkout": ["echo post_checkout"],
+                        "pre_system_dependencies": ["echo pre_system_dependencies"],
+                        "post_system_dependencies": ["echo post_system_dependencies"],
+                        "pre_create_environment": ["echo pre_create_environment"],
+                        "post_create_environment": ["echo post_create_environment"],
+                        "pre_install": ["echo pre_install", "echo `date`"],
+                        "post_install": ["echo post_install"],
+                        "pre_build": [
+                            "echo pre_build",
+                            'sed -i -e "s|{VERSION}|${READTHEDOCS_VERSION_NAME}|g"',
+                        ],
+                        "post_build": ["echo post_build"],
+                    },
+                },
+            },
+        )
+        build.validate()
+        assert isinstance(build.build, BuildWithOs)
+        assert isinstance(build.build.jobs, BuildJobs)
+        assert build.build.jobs.pre_checkout == ["echo pre_checkout"]
+        assert build.build.jobs.post_checkout == ["echo post_checkout"]
+        assert build.build.jobs.pre_system_dependencies == [
+            "echo pre_system_dependencies"
+        ]
+        assert build.build.jobs.post_system_dependencies == [
+            "echo post_system_dependencies"
+        ]
+        assert build.build.jobs.pre_create_environment == [
+            "echo pre_create_environment"
+        ]
+        assert build.build.jobs.post_create_environment == [
+            "echo post_create_environment"
+        ]
+        assert build.build.jobs.pre_install == ["echo pre_install", "echo `date`"]
+        assert build.build.jobs.post_install == ["echo post_install"]
+        assert build.build.jobs.pre_build == [
+            "echo pre_build",
+            'sed -i -e "s|{VERSION}|${READTHEDOCS_VERSION_NAME}|g"',
+        ]
+        assert build.build.jobs.post_build == ["echo post_build"]
 
     @pytest.mark.parametrize(
         'value',
@@ -1078,8 +1256,8 @@ class TestBuildConfigV2:
     @pytest.mark.parametrize(
         'image,versions',
         [
-            ('latest', ['2', '2.7', '3', '3.5', '3.6', '3.7', 'pypy3.5']),
-            ('stable', ['2', '2.7', '3', '3.5', '3.6', '3.7']),
+            ("latest", ["2", "2.7", "3", "3.5", "3.6", "3.7"]),
+            ("stable", ["2", "2.7", "3", "3.5", "3.6", "3.7"]),
         ],
     )
     def test_python_version(self, image, versions):
@@ -1293,7 +1471,10 @@ class TestBuildConfigV2:
         with raises(InvalidConfig) as excinfo:
             build.validate()
 
-        assert str(excinfo.value) == 'Invalid "python.install[0].requirements": expected string'
+        assert (
+            str(excinfo.value)
+            == 'Invalid configuration option "python.install[0].requirements": expected string'
+        )
 
     def test_python_install_requirements_does_not_allow_empty_string(self, tmpdir):
         build = self.get_build_config(
@@ -1577,53 +1758,6 @@ class TestBuildConfigV2:
         assert install[1].method == SETUPTOOLS
 
         assert install[2].requirements == 'three.txt'
-
-    @pytest.mark.parametrize('value', [True, False])
-    def test_python_system_packages_check_valid(self, value):
-        build = self.get_build_config({
-            'python': {
-                'system_packages': value,
-            },
-        })
-        build.validate()
-        assert build.python.use_system_site_packages is value
-
-    @pytest.mark.parametrize('value', [[], 'invalid', 5])
-    def test_python_system_packages_check_invalid(self, value):
-        build = self.get_build_config({
-            'python': {
-                'system_packages': value,
-            },
-        })
-        with raises(InvalidConfig) as excinfo:
-            build.validate()
-        assert excinfo.value.key == 'python.system_packages'
-
-    def test_python_system_packages_check_default(self):
-        build = self.get_build_config({})
-        build.validate()
-        assert build.python.use_system_site_packages is False
-
-    def test_python_system_packages_dont_respects_default(self):
-        build = self.get_build_config(
-            {},
-            {'defaults': {'use_system_packages': True}},
-        )
-        build.validate()
-        assert build.python.use_system_site_packages is False
-
-    def test_python_system_packages_priority_over_default(self):
-        build = self.get_build_config(
-            {'python': {'system_packages': False}},
-        )
-        build.validate()
-        assert build.python.use_system_site_packages is False
-
-        build = self.get_build_config(
-            {'python': {'system_packages': True}},
-        )
-        build.validate()
-        assert build.python.use_system_site_packages is True
 
     @pytest.mark.parametrize('value', [[], True, 0, 'invalid'])
     def test_sphinx_validate_type(self, value):
@@ -2223,7 +2357,6 @@ class TestBuildConfigV2:
                 'install': [{
                     'requirements': 'requirements.txt',
                 }],
-                'use_system_site_packages': False,
             },
             'build': {
                 'image': 'readthedocs/build:latest',
@@ -2283,7 +2416,6 @@ class TestBuildConfigV2:
                 'install': [{
                     'requirements': 'requirements.txt',
                 }],
-                'use_system_site_packages': False,
             },
             'build': {
                 'os': 'ubuntu-20.04',
@@ -2296,6 +2428,19 @@ class TestBuildConfigV2:
                         'version': '16',
                         'full_version': settings.RTD_DOCKER_BUILD_SETTINGS['tools']['nodejs']['16'],
                     },
+                },
+                "commands": [],
+                "jobs": {
+                    "pre_checkout": [],
+                    "post_checkout": [],
+                    "pre_system_dependencies": [],
+                    "post_system_dependencies": [],
+                    "pre_create_environment": [],
+                    "post_create_environment": [],
+                    "pre_install": [],
+                    "post_install": [],
+                    "pre_build": [],
+                    "post_build": [],
                 },
                 'apt_packages': [],
             },

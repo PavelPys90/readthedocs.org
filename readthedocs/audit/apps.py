@@ -8,8 +8,7 @@ log = structlog.get_logger(__name__)
 
 
 class AuditConfig(AppConfig):
-    name = 'readthedocs.audit'
+    name = "readthedocs.audit"
 
     def ready(self):
-        log.info("Importing all Signals handlers")
         import readthedocs.audit.signals  # noqa

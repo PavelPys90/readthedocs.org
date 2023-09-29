@@ -38,7 +38,7 @@ Contributing
 
 You can find information about contributing to Read the Docs at our `Contribution page <https://docs.readthedocs.io/en/latest/contribute.html>`_.
 
-Quickstart for GitHub-Hosted Projects
+Quickstart for GitHub hosted projects
 -------------------------------------
 
 By the end of this quickstart, you will have a new project automatically updated
@@ -69,7 +69,7 @@ when you push to GitHub.
     :scale: 100%
     :target: https://docs.readthedocs.io/en/latest/?badge=latest
 
-.. |coverage| image:: https://codecov.io/gh/readthedocs/readthedocs.org/branch/master/graph/badge.svg
+.. |coverage| image:: https://codecov.io/gh/readthedocs/readthedocs.org/branch/main/graph/badge.svg
     :alt: Test coverage
     :scale: 100%
     :target: https://codecov.io/gh/readthedocs/readthedocs.org
@@ -77,6 +77,6 @@ when you push to GitHub.
 License
 -------
 
-`MIT`_ © 2010-2021 Read the Docs, Inc. & contributors
+`MIT`_ © 2010 Read the Docs, Inc. & contributors
 
 .. _MIT: LICENSE

@@ -1,5 +1,4 @@
 """Organization forms."""
-
 from django import forms
 from django.contrib.auth.models import User
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
@@ -8,14 +7,15 @@ from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 
 from readthedocs.core.history import SimpleHistoryModelForm
+from readthedocs.core.permissions import AdminPermission
 from readthedocs.core.utils import slugify
 from readthedocs.core.utils.extend import SettingsOverrideObject
+from readthedocs.invitations.models import Invitation
 from readthedocs.organizations.constants import ADMIN_ACCESS, READ_ONLY_ACCESS
 from readthedocs.organizations.models import (
     Organization,
     OrganizationOwner,
     Team,
-    TeamInvite,
     TeamMember,
 )
 
@@ -36,31 +36,31 @@ class OrganizationForm(SimpleHistoryModelForm):
 
     class Meta:
         model = Organization
-        fields = ['name', 'email', 'description', 'url']
+        fields = ["name", "email", "description", "url"]
         labels = {
-            'name': _('Organization Name'),
-            'email': _('Billing Email'),
+            "name": _("Organization Name"),
+            "email": _("Billing Email"),
         }
 
     # Don't use a URLField as a widget, the validation is too strict on FF
     url = forms.URLField(
-        widget=forms.TextInput(attrs={'placeholder': 'http://'}),
-        label=_('Site URL'),
+        widget=forms.TextInput(attrs={"placeholder": "http://"}),
+        label=_("Site URL"),
         required=False,
     )
 
     def __init__(self, *args, **kwargs):
         try:
-            self.user = kwargs.pop('user')
+            self.user = kwargs.pop("user")
         except KeyError:
             raise TypeError(
-                'OrganizationForm expects a `user` keyword argument',
+                "OrganizationForm expects a `user` keyword argument",
             )
         super().__init__(*args, **kwargs)
 
     def clean_name(self):
         """Raise exception on duplicate organization slug."""
-        name = self.cleaned_data['name']
+        name = self.cleaned_data["name"]
 
         # Skip slug validation on already created organizations.
         if self.instance.pk:
@@ -68,11 +68,13 @@ class OrganizationForm(SimpleHistoryModelForm):
 
         potential_slug = slugify(name)
         if not potential_slug:
-            raise forms.ValidationError(_('Invalid organization name: no slug generated'))
+            raise forms.ValidationError(
+                _("Invalid organization name: no slug generated")
+            )
         if Organization.objects.filter(slug=potential_slug).exists():
             raise forms.ValidationError(
-                _('Organization %(name)s already exists'),
-                params={'name': name},
+                _("Organization %(name)s already exists"),
+                params={"name": name},
             )
         return name
 
@@ -91,18 +93,18 @@ class OrganizationSignupFormBase(OrganizationForm):
 
     class Meta:
         model = Organization
-        fields = ['name', 'email']
+        fields = ["name", "email"]
         labels = {
-            'name': _('Organization Name'),
-            'email': _('Billing Email'),
+            "name": _("Organization Name"),
+            "email": _("Billing Email"),
         }
 
     url = None
 
     @staticmethod
     def _create_default_teams(organization):
-        organization.teams.create(name='Admins', access=ADMIN_ACCESS)
-        organization.teams.create(name='Read Only', access=READ_ONLY_ACCESS)
+        organization.teams.create(name="Admins", access=ADMIN_ACCESS)
+        organization.teams.create(name="Read Only", access=READ_ONLY_ACCESS)
 
     def save(self, commit=True):
         org = super().save(commit)
@@ -121,45 +123,47 @@ class OrganizationSignupFormBase(OrganizationForm):
 
 
 class OrganizationSignupForm(SettingsOverrideObject):
-
     _default_class = OrganizationSignupFormBase
 
 
-class OrganizationOwnerForm(forms.ModelForm):
+class OrganizationOwnerForm(forms.Form):
 
     """Form to manage owners of the organization."""
 
-    class Meta:
-        model = OrganizationOwner
-        fields = ['owner']
-
-    owner = forms.CharField(label=_('Email address or username'))
+    username_or_email = forms.CharField(label=_("Email address or username"))
 
     def __init__(self, *args, **kwargs):
-        self.organization = kwargs.pop('organization', None)
+        self.organization = kwargs.pop("organization", None)
+        self.request = kwargs.pop("request", None)
         super().__init__(*args, **kwargs)
 
-    def clean_owner(self):
+    def clean_username_or_email(self):
         """Lookup owner by username or email, detect collisions with existing owners."""
-        username = self.cleaned_data['owner']
-        owner = (
-            User.objects.filter(
-                Q(username=username) |
-                Q(emailaddress__verified=True, emailaddress__email=username)
+        username = self.cleaned_data["username_or_email"]
+        user = User.objects.filter(
+            Q(username=username)
+            | Q(emailaddress__verified=True, emailaddress__email=username)
+        ).first()
+        if user is None:
+            raise forms.ValidationError(
+                _("User %(username)s does not exist"),
+                params={"username": username},
             )
-            .first()
+        if self.organization.owners.filter(pk=user.pk).exists():
+            raise forms.ValidationError(
+                _("User %(username)s is already an owner"),
+                params={"username": username},
+            )
+        return user
+
+    def save(self):
+        invitation, _ = Invitation.objects.invite(
+            from_user=self.request.user,
+            to_user=self.cleaned_data["username_or_email"],
+            obj=self.organization,
+            request=self.request,
         )
-        if owner is None:
-            raise forms.ValidationError(
-                _('User %(username)s does not exist'),
-                params={'username': username},
-            )
-        if self.organization.owners.filter(pk=owner.pk).exists():
-            raise forms.ValidationError(
-                _('User %(username)s is already an owner'),
-                params={'username': username},
-            )
-        return owner
+        return invitation
 
 
 class OrganizationTeamBasicFormBase(SimpleHistoryModelForm):
@@ -168,17 +172,17 @@ class OrganizationTeamBasicFormBase(SimpleHistoryModelForm):
 
     class Meta:
         model = Team
-        fields = ['name', 'access', 'organization']
+        fields = ["name", "access", "organization"]
         error_messages = {
             NON_FIELD_ERRORS: {
-                'unique_together': _('Team already exists'),
+                "unique_together": _("Team already exists"),
             },
         }
 
     organization = forms.CharField(widget=forms.HiddenInput(), required=False)
 
     def __init__(self, *args, **kwargs):
-        self.organization = kwargs.pop('organization', None)
+        self.organization = kwargs.pop("organization", None)
         super().__init__(*args, **kwargs)
 
     def clean_organization(self):
@@ -187,7 +191,6 @@ class OrganizationTeamBasicFormBase(SimpleHistoryModelForm):
 
 
 class OrganizationTeamBasicForm(SettingsOverrideObject):
-
     _default_class = OrganizationTeamBasicFormBase
 
 
@@ -197,129 +200,93 @@ class OrganizationTeamProjectForm(forms.ModelForm):
 
     class Meta:
         model = Team
-        fields = ['projects']
+        fields = ["projects"]
 
     def __init__(self, *args, **kwargs):
-        self.organization = kwargs.pop('organization', None)
+        self.organization = kwargs.pop("organization", None)
         super().__init__(*args, **kwargs)
-        self.fields['projects'] = forms.ModelMultipleChoiceField(
+        self.fields["projects"] = forms.ModelMultipleChoiceField(
             queryset=self.organization.projects,
             widget=forms.CheckboxSelectMultiple,
         )
 
 
-class OrganizationTeamMemberForm(forms.ModelForm):
+class OrganizationTeamMemberForm(forms.Form):
 
     """Form to manage all members of the organization."""
 
-    class Meta:
-        model = TeamMember
-        fields = []
-
-    member = forms.CharField(label=_('Email address or username'))
+    username_or_email = forms.CharField(label=_("Email address or username"))
 
     def __init__(self, *args, **kwargs):
-        self.team = kwargs.pop('team', None)
+        self.team = kwargs.pop("team", None)
+        self.request = kwargs.pop("request", None)
         super().__init__(*args, **kwargs)
 
-    def clean_member(self):
+    def clean_username_or_email(self):
         """
-        Get member or invite from field.
+        Validate the user to invite to.
 
-        If input is email, try to look up a user using that email address, if
-        that doesn't return a user, then consider this a fresh invite.  If the
-        input is not an email, treat it as a user name and lookup a user.  Throw
-        a validation error if the username doesn't not exist.
-
-        Return a User instance, or a TeamInvite instance, depending on the above
-        conditions.
+        We search for an existing user by username or email,
+        if none is found, we try to validate if the input is an email,
+        in that case we send an invitation to that email.
         """
-        lookup = self.cleaned_data['member']
+        username = self.cleaned_data["username_or_email"]
+        user = User.objects.filter(
+            Q(username=username)
+            | Q(emailaddress__verified=True, emailaddress__email=username)
+        ).first()
 
-        # Look up user emails first, see if a verified user can be added
+        if user:
+            return self.validate_member_user(user)
+
+        # If it's a valid email,
+        # then try sending an invitation to it.
         try:
-            validator = EmailValidator(code='lookup not an email')
-            validator(lookup)
-
-            member = (
-                User.objects.filter(
-                    emailaddress__verified=True,
-                    emailaddress__email=lookup,
-                    is_active=True,
-                ).first()
-            )
-            if member is not None:
-                return self.validate_member_user(member)
-
-            invite = TeamInvite(
-                organization=self.team.organization,
-                team=self.team,
-                email=lookup,
-            )
-
-            return self.validate_member_invite(invite)
+            validator = EmailValidator(code="lookup not an email")
+            validator(username)
+            return username
         except ValidationError as error:
-            if error.code != 'lookup not an email':
+            if error.code != "lookup not an email":
                 raise
 
-        # Not an email, attempt username lookup
-        try:
-            member = User.objects.get(username=lookup, is_active=True)
-            return self.validate_member_user(member)
-        except User.DoesNotExist:
-            raise forms.ValidationError('User not found')
+        raise forms.ValidationError(
+            _("User %(username)s does not exist"), params={"username": username}
+        )
 
     def validate_member_user(self, member):
         """Verify duplicate team member doesn't already exists."""
         if TeamMember.objects.filter(team=self.team, member=member).exists():
-            raise forms.ValidationError(_('User is already a team member'),)
+            raise forms.ValidationError(
+                _("User is already a team member"),
+            )
         return member
 
-    def validate_member_invite(self, invite):
-        """
-        Verify team member and team invite don't already exist.
-
-        Query searches for duplicate :py:cls:`TeamMember` instances, and also
-        for existing :py:cls:`TeamInvite` instances, sharing the team and email
-        address of the given ``invite``
-
-        :param invite: :py:cls:`TeamInvite` instance
-        """
-        queryset = TeamMember.objects.filter(
-            Q(
-                team=self.team,
-                invite__team=self.team,
-                invite__email=invite.email,
-            ),
-        )
-        if queryset.exists():
-            raise forms.ValidationError(
-                _('An invitation was already sent to this email'),
+    def save(self):
+        """Create an invitation only if the user isn't already a member."""
+        user = self.cleaned_data["username_or_email"]
+        if isinstance(user, User):
+            # If the user is already a member or the organization
+            # don't create an invitation.
+            if (
+                AdminPermission.members(self.team.organization)
+                .filter(pk=user.pk)
+                .exists()
+            ):
+                member = self.team.organization.add_member(user, self.team)
+                if user != self.request.user:
+                    member.send_add_notification(self.request)
+                return user
+            invitation, _ = Invitation.objects.invite(
+                from_user=self.request.user,
+                to_user=user,
+                obj=self.team,
+                request=self.request,
             )
-        return invite
-
-    def clean(self):
-        """
-        Treat an invite email as an invite in the member field.
-
-        This will drop an invite object as the invite field if the member field
-        returned a TeamInvite instance
-        """
-        data = super().clean()
-
-        if not self.is_valid():
-            return data
-
-        self.instance.team = self.team
-        member = data['member']
-
-        if isinstance(member, User):
-            self.instance.invite = None
-            self.instance.member = member
-        elif isinstance(member, TeamInvite):
-            member.save()
-            self.instance.member = None
-            self.instance.invite = member
-
-        self._validate_unique = True
-        return data
+            return invitation
+        invitation, _ = Invitation.objects.invite(
+            from_user=self.request.user,
+            to_email=user,
+            obj=self.team,
+            request=self.request,
+        )
+        return invitation

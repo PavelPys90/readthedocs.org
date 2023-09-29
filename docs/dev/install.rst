@@ -1,41 +1,74 @@
-Development Installation
+Development installation
 ========================
 
 .. meta::
    :description lang=en: Install a local development instance of Read the Docs with our step by step guide.
 
-These are development setup and :ref:`standards <install:Core team standards>` that are adhered to by the core development team while
-developing Read the Docs and related services. If you are a contributor to Read the Docs,
-it might a be a good idea to follow these guidelines as well.
+These are development setup and :ref:`standards <install:Core team standards>` that are followed to by the core development team.
+If you are a contributor to Read the Docs, it might a be a good idea to follow these guidelines as well.
 
-To follow these instructions you will need a Unix-like operating system,
-or `Windows Subsystem for Linux (WSL) <https://docs.microsoft.com/en-us/windows/wsl/>`_.
-Other operating systems are not supported.
+Requirements
+------------
+
+A development setup can be hosted by your laptop, in a VM, on a separate server etc. Any such scenario should work fine, as long as it can satisfy the following:
+
+* Is Unix-like system (Linux, BSD, Mac OSX) which **supports Docker**. Windows systems should have WSL+Docker or Docker Desktop.
+* Has **10 GB or more of free disk space** on the drive where Docker's cache and volumes are stored. If you want to experiment with customizing Docker containers, you'll likely need more.
+* Can spare *2 GB of system memory* for running Read the Docs, this typically means that a development laptop should have **8 GB or more of memory** in total.
+* Your system should *ideally* match the production system which uses the **latest official+stable Docker** distribution for `Ubuntu <https://docs.docker.com/engine/install/ubuntu/>`_ (the ``docker-ce`` package). If you are on Windows or Mac, you may also want to try `Docker Desktop <https://docs.docker.com/desktop/>`_.
 
 .. note::
 
-   We do not recommend to follow this guide to deploy an instance of Read the Docs for production usage.
-   Take into account that this setup is only useful for developing purposes.
+   Take into account that this setup is intended for development purposes.
+   We do not recommend to follow this guide to deploy an instance of Read the Docs for production.
+
+
+Install external dependencies (Docker, Docker Compose, gVisor)
+--------------------------------------------------------------
+
+#. Install Docker by following `the official guide <https://docs.docker.com/get-docker/>`_.
+#. Install Docker Compose with `the official instructions <https://docs.docker.com/compose/install/>`_.
+#. Install and set up gVisor following :doc:`rtd-dev:guides/gvisor`.
 
 
 Set up your environment
 -----------------------
 
-#. install `Docker <https://www.docker.com/>`_ following `their installation guide <https://docs.docker.com/install/>`_.
-
-#. clone the ``readthedocs.org`` repository:
+#. Clone the ``readthedocs.org`` repository:
 
    .. prompt:: bash
 
       git clone --recurse-submodules https://github.com/readthedocs/readthedocs.org/
 
-#. install the requirements from ``common`` submodule:
+#. Install or clone additional repositories:
+
+   .. note::
+
+      This step is only required for Read the Docs core team members.
+
+   Core team should at very least have all required packages installed in their development image.
+   To install these packages you must define a GitHub token before building your image:
+
+   .. prompt:: bash
+
+      export GITHUB_TOKEN="..."
+      export GITHUB_USER="..."
+
+   In order to make development changes on any of our private repositories,
+   such as ``readthedocs-ext`` or ``ext-theme``, you will also need to check these repositories out:
+
+   .. prompt:: bash
+
+      git clone --recurse-submodules https://github.com/readthedocs/readthedocs-ext/
+
+#. Install the requirements from ``common`` submodule:
 
    .. prompt:: bash
 
       pip install -r common/dockerfiles/requirements.txt
 
-#. build the Docker image for the servers:
+
+#. Build the Docker image for the servers:
 
    .. warning::
 
@@ -45,47 +78,39 @@ Set up your environment
 
       inv docker.build
 
-   .. tip::
 
-      If you pass ``GITHUB_TOKEN`` environment variable to this command,
-      it will add support for readthedocs-ext.
-
-#. pull down Docker images for the builders:
+#. Pull down Docker images for the builders:
 
    .. prompt:: bash
 
-      inv docker.pull --only-latest
+      inv docker.pull
 
-#. start all the containers:
+#. Start all the containers:
 
    .. prompt:: bash
 
       inv docker.up  --init  # --init is only needed the first time
 
-#. add read permissions to the storage backend:
-
-   * go to http://localhost:9000/ (MinIO S3 storage backend)
-   * login as ``admin`` / ``password``
-   * click "..." next to the ``static`` bucket name and then "Edit Policy"
-   * leave "prefix" empty and click "Add" to give "Read Only" access on the ``static`` bucket
-   * click on the "+" icon on the bottom-right corner, then "Create bucket" with the name ``media``,
-     hit Enter on the keyboard, and repeat the operation above to give "Read Only" access to it
-
-#. go to http://community.dev.readthedocs.io to access your local instance of Read the Docs.
+#. Go to http://devthedocs.org to access your local instance of Read the Docs.
 
 
 Check that everything works
 ---------------------------
 
-#. go to http://community.dev.readthedocs.io and check that the appearance and style looks correct
-   (otherwise the MinIO buckets might be misconfigured, see above)
+#. Visit http://devthedocs.org
 
-#. login as ``admin`` /  ``admin`` and verify that the project list appears
+#. Login as ``admin`` /  ``admin`` and verify that the project list appears.
 
-#. go to the "Read the Docs" project, click on the "Build version" button to build ``latest``,
-   and wait until it finishes
+#. Go to the "Read the Docs" project, under section :guilabel:`Build a version`, click on the :guilabel:`Build version` button selecting "latest",
+   and wait until it finishes (this can take several minutes).
 
-#. click on the "View docs" button to browse the documentation, and verify that it works
+.. warning::
+
+   Read the Docs will compile the Python/Node.js/Rust/Go version on-the-fly each time when building the documentation.
+   To speed things up, you can pre-compile and cache all these versions by using ``inv docker.compilebuildtool`` command.
+   *We strongly recommend to pre-compile these versions if you want to build documentation on your development instance.*
+
+#. Click on the "View docs" button to browse the documentation, and verify that it shows the Read the Docs documentation page.
 
 
 Working with Docker Compose
@@ -104,6 +129,12 @@ save some work while typing docker compose commands. This section explains these
     * ``--init`` is used the first time this command is ran to run initial migrations, create an admin user, etc
     * ``--no-reload`` makes all celery processes and django runserver
       to use no reload and do not watch for files changes
+    * ``--no-django-debug`` runs all containers with ``DEBUG=False``
+    * ``--http-domain`` configures an external domain for the environment (useful for Ngrok or other http proxy).
+      Note that https proxies aren't supported.
+      There will also be issues with "suspicious domain" failures on Proxito.
+    * ``--ext-theme`` to use the new dashboard templates
+    * ``--webpack`` to start the Webpack dev server for the new dashboard templates
 
 ``inv docker.shell``
     Opens a shell in a container (web by default).
@@ -142,15 +173,19 @@ save some work while typing docker compose commands. This section explains these
 ``inv docker.test``
     Runs all the test suites inside the container.
 
-    * ``--arguments`` will pass arguments to Tox command (e.g. ``--arguments "-e py38 -- -k test_api"``)
+    * ``--arguments`` will pass arguments to Tox command (e.g. ``--arguments "-e py310 -- -k test_api"``)
 
 ``inv docker.pull``
     Downloads and tags all the Docker images required for builders.
 
-    * ``--only-latest`` does not pull ``stable`` and ``testing`` images.
+    * ``--only-required`` pulls only the image ``ubuntu-20.04``.
 
 ``inv docker.buildassets``
     Build all the assets and "deploy" them to the storage.
+
+``inv docker.compilebuildtool``
+    Pre-compile and cache tools that can be specified in ``build.tools`` to speed up builds.
+    It requires ``inv docker.up`` running in another terminal to be able to upload the pre-compiled version to the cache.
 
 Adding a new Python dependency
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -181,7 +216,9 @@ you can use ``celery.contrib.rdb``:
 
 .. code-block:: python
 
-    from celery.contrib import rdb; rdb.set_trace()
+    from celery.contrib import rdb
+
+    rdb.set_trace()
 
 When the breakpoint is hit, the Celery worker will pause on the breakpoint and
 will alert you on STDOUT of a port to connect to. You can open a shell into the container
@@ -199,8 +236,8 @@ debugging currently.
 Configuring connected accounts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-These are optional steps to setup the :doc:`connected accounts <rtd:connected-accounts>`
-(GitHub, GitLab, and BitBucket) in your development environment.
+These are optional steps to setup the :doc:`connected accounts <rtd:guides/connecting-git-account>`
+(|git_providers_and|) in your development environment.
 This will allow you to login to your local development instance
 using your GitHub, Bitbucket, or GitLab credentials
 and this makes the process of importing repositories easier.
@@ -213,17 +250,74 @@ For others, the webhook will simply fail to connect when there are new commits t
 .. figure:: /_static/images/development/bitbucket-oauth-setup.png
     :align: center
     :figwidth: 80%
-    :target: /_static/images/development/bitbucket-oauth-setup.png
 
     Configuring an OAuth consumer for local development on Bitbucket
 
 * Configure the applications on GitHub, Bitbucket, and GitLab.
-  For each of these, the callback URI is ``http://community.dev.readthedocs.io/accounts/<provider>/login/callback/``
+  For each of these, the callback URI is ``http://devthedocs.org/accounts/<provider>/login/callback/``
   where ``<provider>`` is one of ``github``, ``gitlab``, or ``bitbucket_oauth2``.
   When setup, you will be given a "Client ID" (also called an "Application ID" or just "Key") and a "Secret".
 * Take the "Client ID" and "Secret" for each service and enter it in your local Django admin at:
-  ``http://community.dev.readthedocs.io/admin/socialaccount/socialapp/``.
+  ``http://devthedocs.org/admin/socialaccount/socialapp/``.
   Make sure to apply it to the "Site".
+
+
+Troubleshooting
+---------------
+
+.. warning::
+
+    The environment is developed and mainly tested on Docker Compose v1.x.
+    If you are running Docker Compose 2.x, please make sure you have ``COMPOSE_COMPATIBILITY=true`` set.
+    This is automatically loaded via the ``.env`` file.
+    If you want to ensure that the file is loaded, run:
+
+    .. code-block:: console
+
+        source .env
+
+Builds fail with a generic error
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There are projects that do not use the default Docker image downloaded when setting up the development environment.
+These extra images are not downloaded by default because they are big and they are not required in all cases.
+However, if you are seeing the following error
+
+.. figure:: /_static/images/development/read-the-docs-build-failing.png
+    :align: center
+    :figwidth: 80%
+
+    Build failing with a generic error
+
+
+and in the console where the logs are shown you see something like ``BuildAppError: No such image: readthedocs/build:ubuntu-22.04``,
+that means the application wasn't able to find the Docker image required to build that project and it failed.
+
+In this case, you can run a command to download all the optional Docker images:
+
+.. prompt:: bash
+
+   inv docker.pull
+
+However, if you prefer to download only the *specific* image required for that project and save some space on disk,
+you have to follow these steps:
+
+#. go to https://hub.docker.com/r/readthedocs/build/tags
+#. find the latest tag for the image shown in the logs
+   (in this example is ``readthedocs/build:ubuntu-22.04``, which the current latest tag on that page is ``ubuntu-22.04-2022.03.15``)
+#. run the Docker command to pull it:
+
+   .. prompt:: bash
+
+      docker pull readthedocs/build:ubuntu-22.04-2022.03.15
+
+#. tag the downloaded Docker image for the app to findit:
+
+   .. prompt:: bash
+
+      docker tag readthedocs/build:ubuntu-22.04-2022.03.15 readthedocs/build:ubuntu-22.04
+
+Once this is done, you should be able to trigger a new build on that project and it should succeed.
 
 
 Core team standards

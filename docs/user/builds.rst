@@ -1,10 +1,132 @@
-Build Process
-=============
+Build process overview
+======================
 
-Every documentation build has limited resources.
-Our current build limits are:
+Once a project has been imported and a build is triggered,
+Read the Docs executes a set of :term:`pre-defined jobs <pre-defined build jobs>` to build and upload documentation.
+This page explains in detail what happens behind the scenes,
+and includes an overview of how you can change this process.
+
+Understanding the build process
+-------------------------------
+
+Understanding how your content is built helps with debugging any problems you might hit.
+It also gives you the knowledge to customize the build process.
+
+.. note::
+
+   All the steps are run inside a Docker container, using the image defined in :ref:`config-file/v2:build.os`.
+   The build has access to all :doc:`pre-defined environment variables </reference/environment-variables>` and :doc:`custom environment variables </environment-variables>`.
+
+
+The build process includes the following jobs:
+
+:checkout:
+
+   Checks out a project's code from the repository URL.
+   On |com_brand|,
+   this environment includes the SSH deploy key that gives access to the repository.
+
+:system_dependencies:
+
+   Installs operating system and runtime dependencies.
+   This includes specific versions of a language (e.g. Python, Node.js, Go, Rust) and also ``apt`` packages.
+
+   :ref:`config-file/v2:build.tools` can be used to define a language version,
+   and :ref:`config-file/v2:build.apt_packages` to define ``apt`` packages.
+
+:create_environment:
+
+   Creates a Python environment to install all the dependencies in an isolated and reproducible way.
+   Depending on what's defined by the project,
+   a virtualenv or a conda environment (:ref:`config-file/v2:conda`) will be used.
+
+:install:
+
+   Install :doc:`default and project dependencies </build-default-versions>`.
+   This includes any requirements you have configured in :ref:`config-file/v2:requirements file`.
+
+   If the project has extra Python requirements,
+   :ref:`config-file/v2:python.install` can be used to specify them.
+
+   .. tip::
+
+    We strongly recommend :doc:`pinning all the versions </guides/reproducible-builds>` required to build the documentation to avoid unexpected build errors.
+
+:build:
+
+   Runs the main command to build the documentation for each of the formats declared (:ref:`config-file/v2:formats`).
+   It will use Sphinx (:ref:`config-file/v2:sphinx`) or MkDocs (:ref:`config-file/v2:mkdocs`) depending on the project.
+
+:upload:
+
+   Once the build process finishes successfully,
+   the resulting artifacts are uploaded to our servers.
+   Our :doc:`CDN </reference/cdn>` is then purged so your docs are *always up to date*.
+
+
+.. seealso::
+
+    If you require additional build steps or customization,
+    it's possible to run user-defined commands and :doc:`customize the build process </build-customization>`.
+
+Cancelling builds
+-----------------
+
+There may be situations where you want to cancel a running build.
+Cancelling builds allows your team to speed up review times and also help us reduce server costs and our environmental footprint.
+
+A couple common reasons you might want to cancel builds are:
+
+* the build has an external dependency that hasn't been updated
+* there were no changes on the documentation files
+
+For these scenarios,
+Read the Docs supports three different mechanisms to cancel a running build:
+
+:Manually:
+
+   Once a build was triggered,
+   project administrators can go to the build detail page
+   and click :guilabel:`Cancel build`.
+
+:Automatically:
+
+   When Read the Docs detects a push to a version that is already building,
+   it cancels the running build and starts a new build using the latest commit.
+
+:Programatically:
+
+   You can use user-defined commands on ``build.jobs`` or ``build.commands`` (see :doc:`build-customization`)
+   to check for your own cancellation condition and then return exit code ``183`` to cancel a build.
+   You can exit with the code ``0`` to continue running the build.
+
+   When this happens, Read the Docs will notify your Git platform (GitHub/GitLab) that the build succeeded (✅),
+   so the pull request doesn't have any failing checks.
+
+   .. tip::
+
+      Take a look at :ref:`build-customization:cancel build based on a condition` section for some examples.
+
+
+Build resources
+---------------
+
+Every build has limited resources assigned to it.
+Generally, |com_brand| users get double the build resources,
+with the option to increase that.
+
+Our build limits are:
 
 .. tabs::
+
+   .. tab:: |com_brand|
+
+      * 30 minutes build time
+      * 7GB of memory
+      * Concurrent builds vary based on your pricing plan
+
+      If you are having trouble with your documentation builds,
+      you can reach our support at support@readthedocs.com.
 
    .. tab:: |org_brand|
 
@@ -18,184 +140,3 @@ Our current build limits are:
       If your business is hitting build limits hosting documentation on Read the Docs,
       please consider :doc:`Read the Docs for Business </commercial/index>`
       which has much higher build resources.
-
-   .. tab:: |com_brand|
-
-      * 30 minutes build time
-      * 7GB of memory
-      * Concurrent builds vary based on your pricing plan
-
-      If you are having trouble with your documentation builds,
-      you can reach our support at support@readthedocs.com.
-
-Understanding what's going on
------------------------------
-
-Understanding how Read the Docs builds your project will help you with debugging the problems you have with the site.
-It should also allow you to take advantage of certain things that happen during the build process.
-
-The first step of the process is that we check out your code from the repository you have given us.
-If the code is already checked out, we update the copy to the branch that you have specified in your project's configuration.
-
-Then we build the proper backend code for the type of documentation you've selected,
-this is done inside a :ref:`Docker container <builds:Docker images>`.
-
-At this point, if you need extra requirements,
-or even install your own package in the virtual environment to build your documentation,
-you can use a :doc:`config-file/index`.
-
-When we build your Sphinx documentation, we run ``sphinx-build -b <format> . _build/<format>``
-We also create pdf's and ePub's automatically based on your project.
-For MkDocs, we run ``mkdocs build``.
-
-Once these files are built,
-they are deployed to our file hosting backend and will be visible to users.
-
-An example in code:
-
-.. code-block:: python
-
-    update_docs_from_vcs(version)
-    config = get_config(project)
-    if config.python.install.method.pip:
-        run('pip install .')
-    if config.python.install.requirement:
-        run('pip install -r %s' % config.python.install.requirement)
-    build_docs(version)
-    deploy_docs(version)
-
-.. note::
-
-    Regardless of whether you build your docs with Sphinx or MkDocs,
-    we recommend you :ref:`pinning the version <guides/reproducible-builds:pinning dependencies>` of Sphinx or Mkdocs you want us to use.
-    Some examples of pinning versions might be ``sphinx<2.0`` or ``mkdocs>=1.0``.
-
-Build environment
------------------
-
-The *Sphinx* and *Mkdocs* builders set the following RTD-specific environment variables when building your documentation:
-
-.. csv-table:: Environment Variables
-   :header: Environment variable, Description, Example value
-   :widths: 15, 10, 30
-
-   ``READTHEDOCS``, Whether the build is running inside RTD, ``True``
-   ``READTHEDOCS_VERSION``, The RTD name of the version which is being built, ``latest``
-   ``READTHEDOCS_PROJECT``, The RTD slug of the project which is being built, ``my-example-project``
-   ``READTHEDOCS_LANGUAGE``, The RTD language slug of the project which is being built, ``en``
-
-
-.. tip::
-
-   In case extra environment variables are needed to the build process (like secrets, tokens, etc),
-   you can add them going to :guilabel:`Admin` > :guilabel:`Environment Variables` in your project.
-   See :doc:`/environment-variables`.
-
-
-Docker images
--------------
-
-The build process is executed inside Docker containers,
-by default the image used is ``readthedocs/build:latest``,
-but you can change that using a :doc:`/config-file/index`.
-
-You can see the current Docker build images that we use in our `docker repository <https://github.com/readthedocs/readthedocs-docker-images>`_.
-`Docker Hub <https://hub.docker.com/r/readthedocs/build/>`_ also shows the latest set of images that have been built.
-
-Default versions of dependencies
---------------------------------
-
-Read the Docs supports two tools to build your documentation:
-`Sphinx <https://www.sphinx-doc.org/>`__ and `MkDocs <https://www.mkdocs.org/>`__.
-In order to provide :doc:`several features </features>`,
-Read the Docs injects or modifies some content while building your docs.
-
-In particular, if you don't specify the dependencies of your project,
-we install some of them on your behalf.
-In the past we used to pin these dependencies to a specific version and update them after some time,
-but doing so would break some builds and make it more difficult for new projects to use new versions.
-For this reason, we are now installing their latest version by default.
-
-.. note::
-
-   In order to keep your builds reproducible,
-   it's highly recommended declaring its dependencies and versions explicitly.
-   See :doc:`/guides/reproducible-builds`.
-
-External dependencies
-~~~~~~~~~~~~~~~~~~~~~
-
-Python
-++++++
-
-These are the dependencies that are installed by default when using a Python environment:
-
-Sphinx:
-  Projects created before Oct 20, 2020 use ``1.8.x``.
-  New projects use the latest version.
-
-Mkdocs:
-  Projects created before April 3, 2019 (April 23, 2019 for :doc:`/commercial/index`) use ``0.17.3``.
-  Projects created before March 9, 2021 use ``1.0.4``.
-  New projects use the latest version.
-
-sphinx-rtd-theme:
-  Projects created before October 20, 2020 (January 21, 2021 for :doc:`/commercial/index`) use ``0.4.3``.
-  New projects use the latest version.
-
-pip:
-  Latest version by default.
-
-setuptools:
-  ``58.2.0`` or older.
-
-mock:
-  ``1.0.1`` (could be removed in the future).
-
-pillow:
-  ``5.4.1`` (could be removed in the future).
-
-alabaster:
-  ``0.7.x`` (could be removed in the future).
-
-commonmark:
-  ``0.8.1`` (could be removed in the future).
-
-recommonmark:
-  ``0.5.0`` (could be removed in the future).
-
-Conda
-+++++
-
-These are the dependencies that are installed by default when using a Conda environment:
-
-Conda:
-   Miniconda2 ``4.6.14``
-   (could be updated in the future to use the latest version by default).
-
-Mkdocs:
-  Latest version by default installed via ``conda``.
-
-Sphinx:
-  Latest version by default installed via ``conda``.
-
-sphinx-rtd-theme:
-  Latest version by default installed via ``conda``.
-
-mock:
-  Latest version by default installed via ``pip`` (could be removed in the future).
-
-pillow:
-  Latest version by default installed via ``pip`` (could be removed in the future).
-
-recommonmark:
-  Latest version by default installed via ``conda`` (could be removed in the future).
-
-Internal dependencies
-~~~~~~~~~~~~~~~~~~~~~
-
-Internal dependencies are needed to integrate your docs with Read the Docs.
-We guarantee that these dependencies will work with all current supported versions of our tools,
-you don't need to specify them in your requirements.
-
-- `readthedocs-sphinx-ext <https://github.com/readthedocs/readthedocs-sphinx-ext>`__

@@ -13,9 +13,8 @@ what they stand for.
     Pull requests could be delayed or closed if the pull request doesn't align
     with our current roadmap. An issue or pull request that has not been
     accepted should either eventually move to an accepted state, or should be
-    closed. As an issue is accepted, we will find room for it on our roadmap,
-    either on an upcoming release (point release milestones), or on a future
-    milestone project (named milestones).
+    closed. As an issue is accepted, we will find room for it on our roadmap or
+    roadmap backlog.
 
 *Bug*
     An issue describing unexpected or malicious behaviour of the readthedocs.org
@@ -80,8 +79,8 @@ what they stand for.
     Issues that require changes in the server infrastructure.
 
 *PR: work in progress*
-    Pull Requests that are not complete yet. A final review is not possible
-    yet, but every Pull Request is open for discussion.
+    Pull requests that are not complete yet. A final review is not possible
+    yet, but every pull request is open for discussion.
 
 *PR: hotfix*
     Pull request was applied directly to production after a release. These pull

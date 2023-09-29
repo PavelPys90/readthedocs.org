@@ -1,15 +1,14 @@
 """Allauth overrides."""
 
 import json
-import structlog
 
+import structlog
 from allauth.account.adapter import DefaultAccountAdapter
-from django.conf import settings
 from django.template.loader import render_to_string
 from django.utils.encoding import force_str
 
 from readthedocs.core.utils import send_email
-from readthedocs.organizations.models import TeamMember
+from readthedocs.invitations.models import Invitation
 
 log = structlog.get_logger(__name__)
 
@@ -23,10 +22,10 @@ class AccountAdapter(DefaultAccountAdapter):
 
     def send_mail(self, template_prefix, email, context):
         subject = render_to_string(
-            '{}_subject.txt'.format(template_prefix),
+            "{}_subject.txt".format(template_prefix),
             context,
         )
-        subject = ' '.join(subject.splitlines()).strip()
+        subject = " ".join(subject.splitlines()).strip()
         subject = self.format_email_subject(subject)
 
         # Allauth sends some additional data in the context, remove it if the
@@ -40,32 +39,28 @@ class AccountAdapter(DefaultAccountAdapter):
                 del context[key]
         if removed_keys:
             log.debug(
-                'Removed context we were unable to serialize.',
+                "Removed context we were unable to serialize.",
                 removed_keys=removed_keys,
             )
 
         send_email(
             recipient=email,
             subject=subject,
-            template='{}_message.txt'.format(template_prefix),
-            template_html='{}_message.html'.format(template_prefix),
+            template="{}_message.txt".format(template_prefix),
+            template_html="{}_message.html".format(template_prefix),
             context=context,
         )
 
     def save_user(self, request, user, form, commit=True):
-        """Override default account signup to link user to correct team."""
+        """Override default account signup to redeem invitations at sign-up."""
         user = super().save_user(request, user, form)
-        if not settings.RTD_ALLOW_ORGANIZATIONS:
-            return
 
-        invite_id = request.session.get('invite')
-        if invite_id:
-            try:
-                teammember = TeamMember.objects.get(invite__pk=invite_id)
-                teammember.member = user
-                teammember.save()
-                teammember.invite.delete()
-            except TeamMember.DoesNotExist:
-                log.error(
-                    "Didn't find member related to invite, not adding to team",
-                )
+        invitation_pk = request.session.get("invitation:pk")
+        if invitation_pk:
+            invitation = Invitation.objects.pending().filter(pk=invitation_pk).first()
+            if invitation:
+                log.info("Redeeming invitation at sign-up", invitation_pk=invitation_pk)
+                invitation.redeem(user, request=request)
+                invitation.delete()
+            else:
+                log.info("Invitation not found", invitation_pk=invitation_pk)

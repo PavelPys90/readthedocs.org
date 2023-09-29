@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 """Mercurial-related utilities."""
 from readthedocs.projects.exceptions import RepositoryError
 from readthedocs.vcs_support.base import BaseVCS, VCSVersion
@@ -11,46 +9,40 @@ class Backend(BaseVCS):
 
     supports_tags = True
     supports_branches = True
-    fallback_branch = 'default'
+    fallback_branch = "default"
 
     def update(self):
         super().update()
-        if self.repo_exists():
-            return self.pull()
         return self.clone()
-
-    def repo_exists(self):
-        retcode = self.run('hg', 'status', record=False)[0]
-        return retcode == 0
-
-    def pull(self):
-        (pull_retcode, _, _) = self.run('hg', 'pull')
-        if pull_retcode != 0:
-            raise RepositoryError
-        (update_retcode, stdout, stderr) = self.run('hg', 'update', '--clean')
-        if update_retcode != 0:
-            raise RepositoryError
-        return (update_retcode, stdout, stderr)
 
     def clone(self):
         self.make_clean_working_dir()
-        output = self.run('hg', 'clone', self.repo_url, '.')
-        if output[0] != 0:
-            raise RepositoryError
-        return output
+        try:
+            # Disable sparse-revlog extension when cloning because it's not
+            # included in older versions of Mercurial and producess an error
+            # when using an old version. See
+            # https://github.com/readthedocs/readthedocs.org/pull/9042/
+
+            output = self.run(
+                "hg", "clone", "--config", "format.sparse-revlog=no", self.repo_url, "."
+            )
+            return output
+        except RepositoryError:
+            raise RepositoryError(RepositoryError.CLONE_ERROR())
 
     @property
     def branches(self):
-        retcode, stdout = self.run(
-            'hg',
-            'branches',
-            '--quiet',
-            record_as_success=True,
-        )[:2]
-        # error (or no tags found)
-        if retcode != 0:
+        try:
+            _, stdout, _ = self.run(
+                "hg",
+                "branches",
+                "--quiet",
+                record_as_success=True,
+            )
+            return self.parse_branches(stdout)
+        except RepositoryError:
+            # error (or no tags found)
             return []
-        return self.parse_branches(stdout)
 
     def parse_branches(self, data):
         """
@@ -70,11 +62,12 @@ class Backend(BaseVCS):
 
     @property
     def tags(self):
-        retcode, stdout = self.run('hg', 'tags', record_as_success=True)[:2]
-        # error (or no tags found)
-        if retcode != 0:
+        try:
+            _, stdout, _ = self.run("hg", "tags", record_as_success=True)
+            return self.parse_tags(stdout)
+        except RepositoryError:
+            # error (or no tags found)
             return []
-        return self.parse_tags(stdout)
 
     def parse_tags(self, data):
         """
@@ -100,29 +93,31 @@ class Backend(BaseVCS):
             if len(row) != 2:
                 continue
             name, commit = row
-            if name == 'tip':
+            if name == "tip":
                 continue
-            _, commit_hash = commit.split(':')
+            _, commit_hash = commit.split(":")
             vcs_tags.append(VCSVersion(self, commit_hash, name))
         return vcs_tags
 
     @property
     def commit(self):
-        _, stdout = self.run('hg', 'identify', '--id')[:2]
+        _, stdout = self.run("hg", "identify", "--id")[:2]
         return stdout.strip()
 
     def checkout(self, identifier=None):
         super().checkout()
         if not identifier:
-            identifier = 'tip'
-        exit_code, stdout, stderr = self.run(
-            'hg',
-            'update',
-            '--clean',
-            identifier,
-        )
-        if exit_code != 0:
+            identifier = "tip"
+
+        try:
+            code, stdout, stderr = self.run(
+                "hg",
+                "update",
+                "--clean",
+                identifier,
+            )
+            return code, stdout, stderr
+        except RepositoryError:
             raise RepositoryError(
                 RepositoryError.FAILED_TO_CHECKOUT.format(identifier),
             )
-        return exit_code, stdout, stderr

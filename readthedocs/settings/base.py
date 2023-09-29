@@ -1,6 +1,7 @@
 # pylint: disable=missing-docstring
 
 import os
+import re
 import subprocess
 import socket
 
@@ -9,9 +10,9 @@ import structlog
 from celery.schedules import crontab
 
 from readthedocs.core.logs import shared_processors
+from corsheaders.defaults import default_headers
 from readthedocs.core.settings import Settings
-from readthedocs.projects.constants import CELERY_LOW, CELERY_MEDIUM, CELERY_HIGH
-
+from readthedocs.builds import constants_docker
 
 try:
     import readthedocsext  # noqa
@@ -46,6 +47,28 @@ class CommunityBaseSettings(Settings):
 
     # Debug settings
     DEBUG = True
+    RTD_FORCE_SHOW_DEBUG_TOOLBAR = False
+
+    @property
+    def DEBUG_TOOLBAR_CONFIG(self):
+        def _show_debug_toolbar(request):
+            return request.environ.get('SERVER_NAME', None) != 'testserver' and self.SHOW_DEBUG_TOOLBAR
+
+        return {
+            'SHOW_TOOLBAR_CALLBACK': _show_debug_toolbar,
+        }
+
+    @property
+    def SHOW_DEBUG_TOOLBAR(self):
+        """
+        Show django-debug-toolbar on DEBUG or if it's forced by RTD_FORCE_SHOW_DEBUG_TOOLBAR.
+
+        This will show the debug toolbar on:
+
+          - Docker local instance
+          - web-extra production instance
+        """
+        return self.DEBUG or self.RTD_FORCE_SHOW_DEBUG_TOOLBAR
 
     # Domains and URLs
     RTD_IS_PRODUCTION = False
@@ -63,8 +86,6 @@ class CommunityBaseSettings(Settings):
 
     # slumber settings
     SLUMBER_API_HOST = 'https://readthedocs.org'
-    SLUMBER_USERNAME = None
-    SLUMBER_PASSWORD = None
 
     # Email
     DEFAULT_FROM_EMAIL = 'no-reply@readthedocs.org'
@@ -76,7 +97,7 @@ class CommunityBaseSettings(Settings):
     SESSION_COOKIE_DOMAIN = 'readthedocs.org'
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_AGE = 30 * 24 * 60 * 60  # 30 days
-    SESSION_SAVE_EVERY_REQUEST = True
+    SESSION_SAVE_EVERY_REQUEST = False
 
     @property
     def SESSION_COOKIE_SAMESITE(self):
@@ -90,11 +111,10 @@ class CommunityBaseSettings(Settings):
 
     # CSRF
     CSRF_COOKIE_HTTPONLY = True
-    CSRF_COOKIE_AGE = 30 * 24 * 60 * 60
+    CSRF_COOKIE_AGE = 30 * 24 * 60 * 60  # 30 days
 
     # Security & X-Frame-Options Middleware
     # https://docs.djangoproject.com/en/1.11/ref/middleware/#django.middleware.security.SecurityMiddleware
-    SECURE_BROWSER_XSS_FILTER = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
     X_FRAME_OPTIONS = 'DENY'
@@ -106,16 +126,10 @@ class CommunityBaseSettings(Settings):
     CSP_FRAME_ANCESTORS = ("'none'",)
     CSP_OBJECT_SRC = ("'none'",)
     CSP_REPORT_URI = None
-    CSP_REPORT_ONLY = True  # Set to false to enable CSP in blocking mode
+    CSP_REPORT_ONLY = False
     CSP_EXCLUDE_URL_PREFIXES = (
         "/admin/",
     )
-
-    # Permissions Policy
-    # https://github.com/adamchainz/django-permissions-policy
-    PERMISSIONS_POLICY = {
-        "interest-cohort": [],
-    }
 
     # Read the Docs
     READ_THE_DOCS_EXTENSIONS = ext
@@ -125,14 +139,53 @@ class CommunityBaseSettings(Settings):
     RTD_STABLE_VERBOSE_NAME = 'stable'
     RTD_CLEAN_AFTER_BUILD = False
     RTD_MAX_CONCURRENT_BUILDS = 4
+    RTD_BUILDS_MAX_RETRIES = 25
+    RTD_BUILDS_RETRY_DELAY = 5 * 60  # seconds
     RTD_BUILD_STATUS_API_NAME = 'docs/readthedocs'
     RTD_ANALYTICS_DEFAULT_RETENTION_DAYS = 30 * 3
     RTD_AUDITLOGS_DEFAULT_RETENTION_DAYS = 30 * 3
 
+    # Number of days the validation process for a domain will be retried.
+    RTD_CUSTOM_DOMAINS_VALIDATION_PERIOD = 30
+
+    # Keep BuildData models on database during this time
+    RTD_TELEMETRY_DATA_RETENTION_DAYS = 30 * 6  # 180 days / 6 months
+
+    # Number of days an invitation is valid.
+    RTD_INVITATIONS_EXPIRATION_DAYS = 15
+
+    RTD_ENFORCE_BROWNOUTS_FOR_DEPRECATIONS = False
+
+    @property
+    def RTD_DEFAULT_FEATURES(self):
+        # Features listed here will be available to users that don't have a
+        # subscription or if their subscription doesn't include the feature.
+        # Depending on the feature type, the numeric value represents a
+        # number of days or limit of the feature.
+        from readthedocs.subscriptions import constants
+        from readthedocs.subscriptions.products import RTDProductFeature
+        return dict((
+            RTDProductFeature(type=constants.TYPE_CNAME).to_item(),
+            RTDProductFeature(type=constants.TYPE_EMBED_API).to_item(),
+            # Retention days for search analytics.
+            RTDProductFeature(type=constants.TYPE_SEARCH_ANALYTICS, value=self.RTD_ANALYTICS_DEFAULT_RETENTION_DAYS).to_item(),
+            # Retention days for page view analytics.
+            RTDProductFeature(type=constants.TYPE_PAGEVIEW_ANALYTICS, value=self.RTD_ANALYTICS_DEFAULT_RETENTION_DAYS).to_item(),
+            # Retention days for audit logs.
+            RTDProductFeature(type=constants.TYPE_AUDIT_LOGS, value=self.RTD_AUDITLOGS_DEFAULT_RETENTION_DAYS).to_item(),
+            # Max number of concurrent builds.
+            RTDProductFeature(type=constants.TYPE_CONCURRENT_BUILDS, value=self.RTD_MAX_CONCURRENT_BUILDS).to_item(),
+        ))
+
+    # A dictionary of Stripe products mapped to a RTDProduct object.
+    # In .org we don't have subscriptions/products, default features are
+    # defined in RTD_DEFAULT_FEATURES.
+    RTD_PRODUCTS = {}
+
     # Database and API hitting settings
-    DONT_HIT_API = False
     DONT_HIT_DB = True
     RTD_SAVE_BUILD_COMMANDS_TO_STORAGE = False
+    DATABASE_ROUTERS = ['readthedocs.core.db.MapAppsRouter']
 
     USER_MATURITY_DAYS = 7
 
@@ -171,6 +224,7 @@ class CommunityBaseSettings(Settings):
             'django_gravatar',
             'rest_framework',
             'rest_framework.authtoken',
+            "rest_framework_api_key",
             'corsheaders',
             'annoying',
             'django_extensions',
@@ -180,6 +234,8 @@ class CommunityBaseSettings(Settings):
             'django_filters',
             'polymorphic',
             'simple_history',
+            'djstripe',
+            'django_celery_beat',
 
             # our apps
             'readthedocs.projects',
@@ -200,9 +256,11 @@ class CommunityBaseSettings(Settings):
             'readthedocs.notifications',
             'readthedocs.integrations',
             'readthedocs.analytics',
-            'readthedocs.sphinx_domains',
             'readthedocs.search',
             'readthedocs.embed',
+            'readthedocs.telemetry',
+            'readthedocs.domains',
+            'readthedocs.invitations',
 
             # allauth
             'allauth',
@@ -212,6 +270,7 @@ class CommunityBaseSettings(Settings):
             'allauth.socialaccount.providers.gitlab',
             'allauth.socialaccount.providers.bitbucket',
             'allauth.socialaccount.providers.bitbucket_oauth2',
+            'cacheops',
         ]
         if ext:
             apps.append('readthedocsext.cdn')
@@ -219,6 +278,9 @@ class CommunityBaseSettings(Settings):
             apps.append('readthedocsext.spamfighting')
         if self.RTD_EXT_THEME_ENABLED:
             apps.append('readthedocsext.theme')
+        if self.SHOW_DEBUG_TOOLBAR:
+            apps.append('debug_toolbar')
+
         return apps
 
     @property
@@ -237,24 +299,31 @@ class CommunityBaseSettings(Settings):
     def USE_PROMOS(self):  # noqa
         return 'readthedocsext.donate' in self.INSTALLED_APPS
 
-    MIDDLEWARE = (
-        'readthedocs.core.middleware.ReadTheDocsSessionMiddleware',
-        'django.middleware.locale.LocaleMiddleware',
-        'django.middleware.common.CommonMiddleware',
-        'django.middleware.security.SecurityMiddleware',
-        'django.middleware.csrf.CsrfViewMiddleware',
-        'django.middleware.clickjacking.XFrameOptionsMiddleware',
-        'django.contrib.auth.middleware.AuthenticationMiddleware',
-        'django.contrib.messages.middleware.MessageMiddleware',
-        'dj_pagination.middleware.PaginationMiddleware',
-        'corsheaders.middleware.CorsMiddleware',
-        'csp.middleware.CSPMiddleware',
-        'readthedocs.core.middleware.ReferrerPolicyMiddleware',
-        'django_permissions_policy.PermissionsPolicyMiddleware',
-        'simple_history.middleware.HistoryRequestMiddleware',
-        'readthedocs.core.logs.ReadTheDocsRequestMiddleware',
-        'django_structlog.middlewares.CeleryMiddleware',
-    )
+    @property
+    def MIDDLEWARE(self):
+        middlewares = [
+            'readthedocs.core.middleware.NullCharactersMiddleware',
+            'readthedocs.core.middleware.ReadTheDocsSessionMiddleware',
+            'django.middleware.locale.LocaleMiddleware',
+            'corsheaders.middleware.CorsMiddleware',
+            'django.middleware.common.CommonMiddleware',
+            'django.middleware.security.SecurityMiddleware',
+            'django.middleware.csrf.CsrfViewMiddleware',
+            'django.middleware.clickjacking.XFrameOptionsMiddleware',
+            'django.contrib.auth.middleware.AuthenticationMiddleware',
+            'django.contrib.messages.middleware.MessageMiddleware',
+            'dj_pagination.middleware.PaginationMiddleware',
+            'csp.middleware.CSPMiddleware',
+            'readthedocs.core.middleware.ReferrerPolicyMiddleware',
+            'simple_history.middleware.HistoryRequestMiddleware',
+            'readthedocs.core.logs.ReadTheDocsRequestMiddleware',
+            'django_structlog.middlewares.CeleryMiddleware',
+        ]
+        if self.SHOW_DEBUG_TOOLBAR:
+            middlewares.insert(0, 'debug_toolbar.middleware.DebugToolbarMiddleware')
+        return middlewares
+
+
 
     AUTHENTICATION_BACKENDS = (
         # Needed to login by username in Django admin, regardless of `allauth`
@@ -310,6 +379,7 @@ class CommunityBaseSettings(Settings):
     STATICFILES_FINDERS = [
         'readthedocs.core.static.SelectiveFileSystemFinder',
         'django.contrib.staticfiles.finders.AppDirectoriesFinder',
+        'readthedocs.core.finders.DebugToolbarFinder',
     ]
     PYTHON_MEDIA = False
 
@@ -319,6 +389,7 @@ class CommunityBaseSettings(Settings):
     RTD_BUILD_ENVIRONMENT_STORAGE = 'readthedocs.builds.storage.BuildMediaFileSystemStorage'
     RTD_BUILD_TOOLS_STORAGE = 'readthedocs.builds.storage.BuildMediaFileSystemStorage'
     RTD_BUILD_COMMANDS_STORAGE = 'readthedocs.builds.storage.BuildMediaFileSystemStorage'
+    RTD_STATICFILES_STORAGE = 'readthedocs.builds.storage.StaticFilesStorage'
 
     @property
     def TEMPLATES(self):
@@ -328,13 +399,22 @@ class CommunityBaseSettings(Settings):
                 os.path.dirname(readthedocsext.theme.__file__),
                 'templates',
             ))
+
+        # Disable ``cached.Loader`` on development
+        # https://docs.djangoproject.com/en/4.2/ref/templates/api/#django.template.loaders.cached.Loader
+        default_loaders = [
+            "django.template.loaders.filesystem.Loader",
+            "django.template.loaders.app_directories.Loader",
+        ]
+        cached_loaders = [("django.template.loaders.cached.Loader", default_loaders)]
+
         return [
             {
                 'BACKEND': 'django.template.backends.django.DjangoTemplates',
                 'DIRS': dirs,
-                'APP_DIRS': True,
                 'OPTIONS': {
                     'debug': self.DEBUG,
+                    'loaders': default_loaders if self.DEBUG else cached_loaders,
                     'context_processors': [
                         'django.contrib.auth.context_processors.auth',
                         'django.contrib.messages.context_processors.messages',
@@ -391,6 +471,7 @@ class CommunityBaseSettings(Settings):
     CELERY_ALWAYS_EAGER = True
     CELERYD_TASK_TIME_LIMIT = 60 * 60  # 60 minutes
     CELERY_SEND_TASK_ERROR_EMAILS = False
+    CELERY_IGNORE_RESULT = True
     CELERYD_HIJACK_ROOT_LOGGER = False
     # This stops us from pre-fetching a task that then sits around on the builder
     CELERY_ACKS_LATE = True
@@ -398,17 +479,11 @@ class CommunityBaseSettings(Settings):
     CELERYD_PREFETCH_MULTIPLIER = 1
     CELERY_CREATE_MISSING_QUEUES = True
 
-    BROKER_TRANSPORT_OPTIONS = {
-        'queue_order_strategy': 'priority',
-        # We use 0 here because some things still put a task in the queue with no priority
-        # I don't fully understand why, but this seems to solve it.
-        'priority_steps': [0, CELERY_LOW, CELERY_MEDIUM, CELERY_HIGH],
-    }
-
     CELERY_DEFAULT_QUEUE = 'celery'
+    CELERYBEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
     CELERYBEAT_SCHEDULE = {
         'quarter-finish-inactive-builds': {
-            'task': 'readthedocs.projects.tasks.finish_inactive_builds',
+            'task': 'readthedocs.projects.tasks.utils.finish_inactive_builds',
             'schedule': crontab(minute='*/15'),
             'options': {'queue': 'web'},
         },
@@ -424,7 +499,17 @@ class CommunityBaseSettings(Settings):
         },
         'every-day-delete-old-page-views': {
             'task': 'readthedocs.analytics.tasks.delete_old_page_counts',
-            'schedule': crontab(minute=0, hour=1),
+            'schedule': crontab(minute=27, hour='*/6'),
+            'options': {'queue': 'web'},
+        },
+        'every-day-delete-old-buildata-models': {
+            'task': 'readthedocs.telemetry.tasks.delete_old_build_data',
+            'schedule': crontab(minute=0, hour=2),
+            'options': {'queue': 'web'},
+        },
+        'weekly-delete-old-personal-audit-logs': {
+            'task': 'readthedocs.audit.tasks.delete_old_personal_audit_logs',
+            'schedule': crontab(day_of_week="wed", minute=0, hour=7),
             'options': {'queue': 'web'},
         },
         'every-day-resync-sso-organization-users': {
@@ -432,22 +517,58 @@ class CommunityBaseSettings(Settings):
             'schedule': crontab(minute=0, hour=4),
             'options': {'queue': 'web'},
         },
-        'hourly-archive-builds': {
-            'task': 'readthedocs.builds.tasks.archive_builds',
-            'schedule': crontab(minute=30),
+        'quarter-archive-builds': {
+            'task': 'readthedocs.builds.tasks.archive_builds_task',
+            'schedule': crontab(minute='*/15'),
             'options': {'queue': 'web'},
             'kwargs': {
                 'days': 1,
+                'limit': 500,
+                'delete': True,
             },
         },
-        'every-day-delete-inactive-external-versions': {
-            'task': 'readthedocs.builds.tasks.delete_inactive_external_versions',
-            'schedule': crontab(minute=0, hour=1),
+        'every-three-hours-delete-inactive-external-versions': {
+            'task': 'readthedocs.builds.tasks.delete_closed_external_versions',
+            # Increase the frequency because we have 255k closed versions and they keep growing.
+            # It's better to increase this frequency than the `limit=` of the task.
+            'schedule': crontab(minute=0, hour='*/3'),
             'options': {'queue': 'web'},
         },
-    }
+        'every-day-resync-remote-repositories': {
+            'task': 'readthedocs.oauth.tasks.sync_active_users_remote_repositories',
+            'schedule': crontab(minute=30, hour=2),
+            'options': {'queue': 'web'},
+        },
+        'every-day-email-pending-custom-domains': {
+            'task': 'readthedocs.domains.tasks.email_pending_custom_domains',
+            'schedule': crontab(minute=0, hour=3),
+            'options': {'queue': 'web'},
+        },
+        'every-15m-delete-pidbox-objects': {
+            'task': 'readthedocs.core.tasks.cleanup_pidbox_keys',
+            'schedule': crontab(minute='*/15'),
+            'options': {'queue': 'web'},
+        },
+        'every-day-delete-old-revoked-build-api-keys': {
+            'task': 'readthedocs.api.v2.tasks.delete_old_revoked_build_api_keys',
+            'schedule': crontab(minute=0, hour=4),
+            'options': {'queue': 'web'},
+        },
+        # We keep having celery send multiple emails,
+        # which is a terrible UX,
+        # so let's remove them for now.
 
-    MULTIPLE_BUILD_SERVERS = [CELERY_DEFAULT_QUEUE]
+        # 'weekly-config-file-notification': {
+        #     'task': 'readthedocs.projects.tasks.utils.deprecated_config_file_used_notification',
+        #     'schedule': crontab(day_of_week='wed', hour=11, minute=15),
+        #     'options': {'queue': 'web'},
+        # },
+        # 'weekly-build-image-notification': {
+        #     'task': 'readthedocs.projects.tasks.utils.deprecated_build_image_notification',
+        #     'schedule': crontab(day_of_week='wed', hour=9, minute=15),
+        #     'options': {'queue': 'web'},
+        # },
+    }
 
     # Sentry
     SENTRY_CELERY_IGNORE_EXPECTED = True
@@ -455,8 +576,6 @@ class CommunityBaseSettings(Settings):
     # Docker
     DOCKER_ENABLE = False
     DOCKER_SOCKET = 'unix:///var/run/docker.sock'
-    # This settings has been deprecated in favor of DOCKER_IMAGE_SETTINGS
-    DOCKER_BUILD_IMAGES = None
 
     # User used to create the container.
     # In production we use the same user than the one defined by the
@@ -470,10 +589,9 @@ class CommunityBaseSettings(Settings):
 
     RTD_DOCKER_COMPOSE = False
 
-    DOCKER_DEFAULT_IMAGE = 'readthedocs/build'
     DOCKER_VERSION = 'auto'
     DOCKER_DEFAULT_VERSION = 'latest'
-    DOCKER_IMAGE = '{}:{}'.format(DOCKER_DEFAULT_IMAGE, DOCKER_DEFAULT_VERSION)
+    DOCKER_IMAGE = '{}:{}'.format(constants_docker.DOCKER_DEFAULT_IMAGE, DOCKER_DEFAULT_VERSION)
     DOCKER_IMAGE_SETTINGS = {
         # A large number of users still have this pinned in their config file.
         # We must have documented it at some point.
@@ -497,7 +615,7 @@ class CommunityBaseSettings(Settings):
         },
         'readthedocs/build:5.0': {
             'python': {
-                'supported_versions': ['2', '2.7', '3', '3.5', '3.6', '3.7', 'pypy3.5'],
+                'supported_versions': ['2', '2.7', '3', '3.5', '3.6', '3.7'],
                 'default_version': {
                     '2': '2.7',
                     '3': '3.7',
@@ -506,7 +624,7 @@ class CommunityBaseSettings(Settings):
         },
         'readthedocs/build:6.0': {
             'python': {
-                'supported_versions': ['2', '2.7', '3', '3.5', '3.6', '3.7', '3.8', 'pypy3.5'],
+                'supported_versions': ['2', '2.7', '3', '3.5', '3.6', '3.7', '3.8'],
                 'default_version': {
                     '2': '2.7',
                     '3': '3.7',
@@ -515,7 +633,7 @@ class CommunityBaseSettings(Settings):
         },
         'readthedocs/build:7.0': {
             'python': {
-                'supported_versions': ['2', '2.7', '3', '3.5', '3.6', '3.7', '3.8', '3.9', '3.10', 'pypy3.5'],
+                'supported_versions': ['2', '2.7', '3', '3.5', '3.6', '3.7', '3.8', '3.9', '3.10'],
                 'default_version': {
                     '2': '2.7',
                     '3': '3.7',
@@ -532,50 +650,10 @@ class CommunityBaseSettings(Settings):
     })
     # Additional binds for the build container
     RTD_DOCKER_ADDITIONAL_BINDS = {}
-
-    # Adding a new tool/version to this setting requires:
-    #
-    # - a mapping between the expected version in the config file, to the full
-    # version installed via asdf (found via ``asdf list all <tool>``)
-    #
-    # - running the script ``./scripts/compile_version_upload.sh`` in
-    # development and production environments to compile and cache the new
-    # tool/version
-    #
-    # Note that when updating this options, you should also update the file:
-    # readthedocs/rtd_tests/fixtures/spec/v2/schema.json
-    RTD_DOCKER_BUILD_SETTINGS = {
-        # Mapping of build.os options to docker image.
-        'os': {
-            'ubuntu-20.04': f'{DOCKER_DEFAULT_IMAGE}:ubuntu-20.04',
-        },
-        # Mapping of build.tools options to specific versions.
-        'tools': {
-            'python': {
-                '2.7': '2.7.18',
-                '3.6': '3.6.15',
-                '3.7': '3.7.12',
-                '3.8': '3.8.12',
-                '3.9': '3.9.7',
-                '3.10': '3.10.0',
-                'pypy3.7': 'pypy3.7-7.3.5',
-                'miniconda3-4.7': 'miniconda3-4.7.12',
-                'mambaforge-4.10': 'mambaforge-4.10.3-10',
-            },
-            'nodejs': {
-                '14': '14.17.6',
-                '16': '16.9.1',
-            },
-            'rust': {
-                '1.55': '1.55.0',
-            },
-            'golang': {
-                '1.17': '1.17.1',
-            },
-        },
-    }
-    # Always point to the latest stable release.
-    RTD_DOCKER_BUILD_SETTINGS['tools']['python']['3'] = RTD_DOCKER_BUILD_SETTINGS['tools']['python']['3.10']
+    RTD_DOCKER_BUILD_SETTINGS = constants_docker.RTD_DOCKER_BUILD_SETTINGS
+    # This is used for the image used to clone the users repo,
+    # since we can't read their config file image choice before cloning
+    RTD_DOCKER_CLONE_IMAGE = RTD_DOCKER_BUILD_SETTINGS["os"]["ubuntu-22.04"]
 
     def _get_docker_memory_limit(self):
         try:
@@ -633,12 +711,19 @@ class CommunityBaseSettings(Settings):
     # All auth
     ACCOUNT_ADAPTER = 'readthedocs.core.adapters.AccountAdapter'
     ACCOUNT_EMAIL_REQUIRED = True
+
+    # Make email verification mandatory.
+    # Users won't be able to login until they verify the email address.
     ACCOUNT_EMAIL_VERIFICATION = 'mandatory'
+
     ACCOUNT_AUTHENTICATION_METHOD = 'username_email'
-    ACCOUNT_ACTIVATION_DAYS = 7
+    ACCOUNT_EMAIL_CONFIRMATION_EXPIRE_DAYS = 7
     SOCIALACCOUNT_AUTO_SIGNUP = False
+    SOCIALACCOUNT_STORE_TOKENS = True
+
     SOCIALACCOUNT_PROVIDERS = {
         'github': {
+            "VERIFIED_EMAIL": True,
             'SCOPE': [
                 'user:email',
                 'read:org',
@@ -647,6 +732,7 @@ class CommunityBaseSettings(Settings):
             ],
         },
         'gitlab': {
+            "VERIFIED_EMAIL": True,
             'SCOPE': [
                 'api',
                 'read_user',
@@ -659,16 +745,22 @@ class CommunityBaseSettings(Settings):
     }
 
     # CORS
-    # So cookies can be included in cross-domain requests where needed (eg. sustainability API).
-    CORS_ALLOW_CREDENTIALS = True
-    CORS_ALLOW_HEADERS = (
-        'x-requested-with',
-        'content-type',
-        'accept',
-        'origin',
-        'authorization',
-        'x-csrftoken'
-    )
+    # Don't allow sending cookies in cross-domain requests, this is so we can
+    # relax our CORS headers for more views, but at the same time not opening
+    # users to CSRF attacks. The sustainability API is the only view that requires
+    # cookies to be send cross-site, we override that for that view only.
+    CORS_ALLOW_CREDENTIALS = False
+
+    # Allow cross-site requests from any origin,
+    # all information from our allowed endpoits is public.
+    #
+    # NOTE: We don't use `CORS_ALLOW_ALL_ORIGINS=True`,
+    # since that will set the `Access-Control-Allow-Origin` header to `*`,
+    # we won't be able to pass credentials fo the sustainability API with that value.
+    CORS_ALLOWED_ORIGIN_REGEXES = [re.compile(".+")]
+    CORS_ALLOW_HEADERS = list(default_headers) + [
+        'x-hoverxref-version',
+    ]
     # Additional protection to allow only idempotent methods.
     CORS_ALLOW_METHODS = [
         'GET',
@@ -676,13 +768,31 @@ class CommunityBaseSettings(Settings):
         'HEAD',
     ]
 
+    # URLs to allow CORS to read from unauthed.
+    CORS_URLS_REGEX = re.compile(
+        r"""
+        ^(
+            /api/v2/footer_html
+            |/api/v2/search
+            |/api/v2/docsearch
+            |/api/v2/embed
+            |/api/v3/embed
+            |/api/v2/sustainability
+        )
+        """,
+        re.VERBOSE,
+    )
+
     # RTD Settings
-    REPO_LOCK_SECONDS = 30
     ALLOW_PRIVATE_REPOS = False
     DEFAULT_PRIVACY_LEVEL = 'public'
     DEFAULT_VERSION_PRIVACY_LEVEL = 'public'
     ALLOW_ADMIN = True
+
+    # Organization settings
     RTD_ALLOW_ORGANIZATIONS = False
+    RTD_ORG_DEFAULT_STRIPE_SUBSCRIPTION_PRICE = 'trial-v2-monthly'
+    RTD_ORG_TRIAL_PERIOD_DAYS = 30
 
     # Elasticsearch settings.
     ES_HOSTS = ['search:9200']
@@ -748,8 +858,29 @@ class CommunityBaseSettings(Settings):
     TAGGIT_TAGS_FROM_STRING = 'readthedocs.projects.tag_utils.rtd_parse_tags'
 
     # Stripe
+    # Existing values we use
     STRIPE_SECRET = None
     STRIPE_PUBLISHABLE = None
+
+    # DJStripe values -- **CHANGE THESE IN PRODUCTION**
+    STRIPE_LIVE_SECRET_KEY = None
+    STRIPE_TEST_SECRET_KEY = "sk_test_x" # A default so the `checks` don't fail
+    DJSTRIPE_WEBHOOK_SECRET = None
+    STRIPE_LIVE_MODE = False  # Change to True in production
+    # This is less optimal than setting the webhook secret
+    # However, the app won't start without the secret
+    # with this setting set to the default
+    DJSTRIPE_WEBHOOK_VALIDATION = "retrieve_event"
+
+    # These values shouldn't need to change..
+    DJSTRIPE_FOREIGN_KEY_TO_FIELD = "id"
+    DJSTRIPE_USE_NATIVE_JSONFIELD = True  # We recommend setting to True for new installations
+
+    # Disable adding djstripe metadata to the Customer objects.
+    # We are managing the subscriber relationship by ourselves,
+    # since we have subscriptions attached to an organization or gold user
+    # we can't make use of the DJSTRIPE_SUBSCRIBER_MODEL setting.
+    DJSTRIPE_SUBSCRIBER_CUSTOMER_KEY = None
 
     # Do Not Track support
     DO_NOT_TRACK_ENABLED = False
@@ -765,19 +896,6 @@ class CommunityBaseSettings(Settings):
     GRAVATAR_DEFAULT_IMAGE = 'https://assets.readthedocs.org/static/images/silhouette.png'  # NOQA
     OAUTH_AVATAR_USER_DEFAULT_URL = GRAVATAR_DEFAULT_IMAGE
     OAUTH_AVATAR_ORG_DEFAULT_URL = GRAVATAR_DEFAULT_IMAGE
-    RESTRUCTUREDTEXT_FILTER_SETTINGS = {
-        'cloak_email_addresses': True,
-        'file_insertion_enabled': False,
-        'raw_enabled': False,
-        'strip_comments': True,
-        'doctitle_xform': True,
-        'sectsubtitle_xform': True,
-        'initial_header_level': 2,
-        'report_level': 5,
-        'syntax_highlight': 'none',
-        'math_output': 'latex',
-        'field_name_limit': 50,
-    }
     REST_FRAMEWORK = {
         'DEFAULT_FILTER_BACKENDS': ('django_filters.rest_framework.DjangoFilterBackend',),
         'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.LimitOffsetPagination',  # NOQA
@@ -856,6 +974,11 @@ class CommunityBaseSettings(Settings):
                 # Always send from the root, handlers can filter levels
                 'level': 'INFO',
             },
+            'docker.utils.config': {
+                'handlers': ['null'],
+                # Don't double log at the root logger for these.
+                'propagate': False,
+            },
             'django_structlog.middlewares.request': {
                 'handlers': ['null'],
                 # Don't double log at the root logger for these.
@@ -876,6 +999,8 @@ class CommunityBaseSettings(Settings):
 
     # MailerLite API for newsletter signups
     MAILERLITE_API_SUBSCRIBERS_URL = 'https://api.mailerlite.com/api/v2/subscribers'
+    MAILERLITE_API_ONBOARDING_GROUP_ID = None
+    MAILERLITE_API_ONBOARDING_GROUP_URL = None
     MAILERLITE_API_KEY = None
 
     RTD_EMBED_API_EXTERNAL_DOMAINS = [
@@ -895,3 +1020,45 @@ class CommunityBaseSettings(Settings):
     RTD_SPAM_THRESHOLD_DONT_SERVE_DOCS = 500
     RTD_SPAM_THRESHOLD_DELETE_PROJECT = 1000
     RTD_SPAM_MAX_SCORE = 9999
+
+    CACHEOPS_ENABLED = False
+    CACHEOPS_TIMEOUT = 60 * 60  # seconds
+    CACHEOPS_OPS = {'get', 'fetch'}
+    CACHEOPS_DEGRADE_ON_FAILURE = True
+    CACHEOPS = {
+        # readthedocs.projects.*
+        'projects.project': {
+            'ops': CACHEOPS_OPS,
+            'timeout': CACHEOPS_TIMEOUT,
+        },
+        'projects.feature': {
+            'ops': CACHEOPS_OPS,
+            'timeout': CACHEOPS_TIMEOUT,
+        },
+        'projects.projectrelationship': {
+            'ops': CACHEOPS_OPS,
+            'timeout': CACHEOPS_TIMEOUT,
+        },
+        'projects.domain': {
+            'ops': CACHEOPS_OPS,
+            'timeout': CACHEOPS_TIMEOUT,
+        },
+
+        # readthedocs.builds.*
+        'builds.version': {
+            'ops': CACHEOPS_OPS,
+            'timeout': CACHEOPS_TIMEOUT,
+        },
+
+        # readthedocs.organizations.*
+        'organizations.organization': {
+            'ops': CACHEOPS_OPS,
+            'timeout': CACHEOPS_TIMEOUT,
+        },
+
+        # readthedocs.subscriptions.*
+        'subscriptions.planfeature': {
+            'ops': CACHEOPS_OPS,
+            'timeout': CACHEOPS_TIMEOUT,
+        },
+    }
